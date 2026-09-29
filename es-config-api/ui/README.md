@@ -5,6 +5,7 @@ configuration with a dry run before every change, roll back with one click, and 
 manage users, the allowlist and the audit log.
 
 - **End users:** read [`docs/USER_GUIDE.md`](../docs/USER_GUIDE.md) (also shared as a Claude Doc).
+- **Scripts / API:** every endpoint with `curl` examples in [`docs/API_REFERENCE.md`](../docs/API_REFERENCE.md).
 - **This file:** how the UI is built, run, changed and deployed.
 
 | | |

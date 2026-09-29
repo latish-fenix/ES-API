@@ -23,6 +23,7 @@ Interactive API docs: `http://<host>/docs`
 | Document | For | What's in it |
 | --- | --- | --- |
 | [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md) | everyone using the web console | every screen, step by step, with screenshots (also shared as a Claude Doc) |
+| [`docs/API_REFERENCE.md`](docs/API_REFERENCE.md) | scripts and automation | every endpoint with a ready-to-run `curl` example and its response (also shared as a Claude Doc) |
 | This README | whoever runs the API | setup on EC2, sign-in, API usage, configuration, internals |
 | [`ui/README.md`](ui/README.md) | developers of the web console | stack, build, structure, how it talks to the API |
 | [`local-test/TESTING.md`](local-test/TESTING.md) | testers | run everything on a Windows PC and walk through each feature |
@@ -141,6 +142,9 @@ curl "${H[@]}" -X PUT $API/admin/users/sam@fenixcommerce.com/permissions -d '{"s
 ```
 
 ## Using it
+
+A ready-to-run `curl` example with its response for **every** endpoint is in
+[`docs/API_REFERENCE.md`](docs/API_REFERENCE.md). The short version:
 
 ```bash
 # Which clusters can I see?

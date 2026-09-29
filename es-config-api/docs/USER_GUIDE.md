@@ -10,7 +10,7 @@ The ES Config Console is the web page for reading and changing Elasticsearch con
 
 What you can see and do depends on your access level on each cluster (see [Finding your way](#finding-your-way)). Admins also get the Users, Allowlist and Audit log pages.
 
-For scripts and automation, the same actions are available through the API; see the [ES Config API endpoint reference](https://claude.ai/code/artifact/21683e33-2775-49ce-ada3-c6a7ce220773).
+For scripts and automation, the same actions are available through the API; see [API_REFERENCE.md](API_REFERENCE.md) (also shared as the [ES Config API endpoint reference](https://claude.ai/code/artifact/21683e33-2775-49ce-ada3-c6a7ce220773)).
 
 ## Getting started
 
@@ -331,5 +331,5 @@ A red box always means nothing was changed; its last line shows the error code a
 - **Can I recover a deleted index's documents?** No. Only its settings, mappings and aliases are saved, so an empty copy can be recreated from **Definition**.
 - **Who can see my changes?** Admins, in the audit log, with your email, time, reason and diff.
 - **Do I need to sign out when an admin changes my access?** No, it applies to your next click.
-- **Can scripts do the same things?** Yes, through the API with a token from sign-in; see the endpoint reference and the main `README.md`.
+- **Can scripts do the same things?** Yes, through the API with a token from sign-in; see [API_REFERENCE.md](API_REFERENCE.md).
 - **Is there SSO?** Not yet; sign-in is by email and password.
