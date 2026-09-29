@@ -1,0 +1,10 @@
+.env
+config/clusters.yaml
+certs/
+.local-store/
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+local-test/.store/
+local-test/clusters.local.yaml

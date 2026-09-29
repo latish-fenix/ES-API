@@ -1,0 +1,33 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ListStatePrefix",
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::fenix-es-config-api",
+      "Condition": { "StringLike": { "s3:prefix": ["es-config-api/*"] } }
+    },
+    {
+      "Sid": "ReadWriteState",
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:PutObject"],
+      "Resource": "arn:aws:s3:::fenix-es-config-api/es-config-api/*"
+    },
+    {
+      "Sid": "DeleteLocksAndAllowlistOverridesOnly",
+      "Effect": "Allow",
+      "Action": "s3:DeleteObject",
+      "Resource": [
+        "arn:aws:s3:::fenix-es-config-api/es-config-api/locks/*",
+        "arn:aws:s3:::fenix-es-config-api/es-config-api/state/allowlist/*"
+      ]
+    },
+    {
+      "Sid": "KmsIfBucketUsesSseKms",
+      "Effect": "Allow",
+      "Action": ["kms:GenerateDataKey", "kms:Decrypt"],
+      "Resource": "arn:aws:kms:us-east-1:ACCOUNT_ID:key/KEY_ID"
+    }
+  ]
+}

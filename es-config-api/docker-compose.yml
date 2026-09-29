@@ -1,0 +1,12 @@
+services:
+  es-config-api:
+    build: .
+    image: es-config-api:latest
+    restart: unless-stopped
+    ports:
+      - "8080:8080"          # restrict with the EC2 security group
+    env_file: .env           # S3 settings, bootstrap admins, ES credentials
+    volumes:
+      - ./config/clusters.yaml:/app/config/clusters.yaml:ro
+      - ./certs:/app/certs:ro # CA certificates referenced from clusters.yaml
+    # On EC2 the instance IAM role provides AWS credentials; no keys needed here.

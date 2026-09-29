@@ -1,0 +1,27 @@
+# Copy to config/clusters.yaml. Never put secrets here: use ${ENV_VAR} references,
+# and ${VAR:-default} for optional values. The API refuses to start if a referenced
+# variable is unset. Restart the container after editing this file.
+clusters:
+  - id: prod-us                 # lowercase letters, digits, - and _ ; used in URLs
+    name: Production US
+    description: Customer-facing search, us-east-1
+    hosts:                      # one or more nodes; or use `url:` for a single one
+      - https://10.0.1.10:9200
+      - https://10.0.1.11:9200
+    auth:
+      type: basic               # basic | api_key | none
+      username: ${ES_PROD_US_USER}
+      password: ${ES_PROD_US_PASSWORD}
+    verify_certs: true
+    ca_certs: /app/certs/prod-us-ca.crt
+    request_timeout: 30
+    tags: [production]
+
+  - id: staging
+    name: Staging
+    url: https://10.0.2.10:9200
+    auth:
+      type: api_key
+      api_key: ${ES_STAGING_API_KEY}
+    ca_certs: /app/certs/staging-ca.crt
+    tags: [staging]
