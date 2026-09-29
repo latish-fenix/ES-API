@@ -29,7 +29,7 @@ function ClusterSwitch({ current }: { current: string | undefined }) {
 
   const onChange = (next: string) => {
     // Keep the same section (cluster settings, indices…) when switching clusters.
-    const m = location.pathname.match(/^\/c\/[^/]+(\/(cluster-settings|indices|index-templates|component-templates|ilm-policies|ingest-pipelines))?/);
+    const m = location.pathname.match(/^\/c\/[^/]+(\/(cluster-settings|indices|data|index-templates|component-templates|ilm-policies|ingest-pipelines))?/);
     navigate(`/c/${encodeURIComponent(next)}${m?.[1] ?? ""}`);
   };
   return (
@@ -87,12 +87,14 @@ export function Shell() {
             <NavItem to={c} end icon="overview" label="Overview" />
             <NavItem to={`${c}/cluster-settings`} icon="sliders" label="Cluster settings" />
             <NavItem to={`${c}/indices`} icon="table" label="Indices" />
+            <NavItem to={`${c}/data`} icon="database" label="Data" />
             {NAMED_TYPES.map((t) => <NavItem key={t} to={`${c}/${t}`} icon={NAMED_META[t].icon} label={NAMED_META[t].label} />)}
           </div>
         )}
         {me.admin && (
           <div className="nav-group">
             <span className="nav-label">Administration</span>
+            <NavItem to="/admin/clusters" icon="server" label="Clusters" />
             <NavItem to="/admin/users" icon="users" label="Users" />
             <NavItem to="/admin/allowlist" icon="shield" label="Allowlist" />
             <NavItem to="/admin/audit" icon="list" label="Audit log" />

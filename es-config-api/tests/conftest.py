@@ -61,7 +61,7 @@ def prefix(es):
     yield p
     for row in es("GET", "/_cat/indices", params={"format": "json", "h": "index",
                                                   "expand_wildcards": "all"}, ok=False) or []:
-        if row["index"].startswith("cfgtest-"):
+        if row["index"].startswith(("cfgtest-", ".cfgtest-")):
             es("DELETE", f"/{row['index']}", ok=False)
     for ds in (es("GET", "/_data_stream", ok=False) or {}).get("data_streams", []):
         if ds["name"].startswith(p):

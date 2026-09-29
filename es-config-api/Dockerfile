@@ -17,7 +17,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
 COPY --from=ui /src/app/static/ui ./app/static/ui
-RUN useradd --system --uid 10001 api && mkdir -p /app/config && chown -R api /app
+RUN useradd --system --uid 10001 api && mkdir -p /app/config /app/data && chown -R api /app
 USER api
 
 EXPOSE 8080

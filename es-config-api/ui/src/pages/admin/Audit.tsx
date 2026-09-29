@@ -9,7 +9,7 @@ import { Badge, Empty, ErrorCallout, Loading, downloadFile } from "../../compone
 import { CONFIG_TYPE_LABEL, pretty, todayUtc, when } from "../../format";
 import { useClusters } from "../../session";
 
-const ACTIONS = ["UPDATE", "ROLLBACK", "DRY_RUN", "INDEX_DELETE", "ADMIN_*", "AUTH_*"];
+const ACTIONS = ["UPDATE", "ROLLBACK", "DRY_RUN", "INDEX_DELETE", "DATA_SEARCH", "DATA_EXPORT", "DATA_*", "ADMIN_*", "ADMIN_CLUSTER_*", "AUTH_*"];
 const OUTCOMES = ["SUCCESS", "REJECTED", "FAILED", "NO_CHANGE"];
 
 const HUMAN: Record<string, string> = {
@@ -27,6 +27,12 @@ const HUMAN: Record<string, string> = {
   ADMIN_PASSWORD_RESET: "Password reset",
   ADMIN_ALLOWLIST_UPDATE: "Allowlist update",
   ADMIN_ALLOWLIST_DELETE: "Allowlist override removed",
+  ADMIN_CLUSTER_CREATE: "Cluster added",
+  ADMIN_CLUSTER_UPDATE: "Cluster changed",
+  ADMIN_CLUSTER_DELETE: "Cluster removed",
+  DATA_SEARCH: "Data search",
+  DATA_DOCUMENT: "Document viewed",
+  DATA_EXPORT: "Data export",
 };
 
 export function actionLabel(e: AuditEvent): string {
@@ -164,7 +170,7 @@ export function Audit() {
                         <td className="mono">{when(e.timestamp, false)}</td>
                         <td>{e.actor}</td>
                         <td className="mono" style={{ fontSize: 12 }}>{e.action}</td>
-                        <td>{e.configType ?? (e.action.startsWith("ADMIN_ALLOWLIST") ? "allowlist" : e.action.startsWith("ADMIN_") ? "users" : e.action.startsWith("AUTH_") ? "auth" : "—")}</td>
+                        <td>{e.configType ?? (e.action.startsWith("ADMIN_ALLOWLIST") ? "allowlist" : e.action.startsWith("ADMIN_CLUSTER") ? "clusters" : e.action.startsWith("ADMIN_") ? "users" : e.action.startsWith("AUTH_") ? "auth" : "—")}</td>
                         <td className="cell-mono">{target(e)}</td>
                         <td><AuditOutcome outcome={e.outcome} /></td>
                       </tr>

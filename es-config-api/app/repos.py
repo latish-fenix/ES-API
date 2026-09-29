@@ -164,6 +164,18 @@ class UsersRepo:
         before = _update_with_retry(self.store, self.KEY, mutate, {"users": {}})
         return {"before": before, "after": clusters}
 
+    def drop_cluster(self, cluster_id: str, by: str) -> list[str]:
+        """Remove a deleted cluster from everyone's permissions; returns who had access."""
+        def mutate(doc):
+            touched = []
+            for name, rec in doc["users"].items():
+                if cluster_id in (rec.get("clusters") or {}):
+                    rec["clusters"] = {k: v for k, v in rec["clusters"].items() if k != cluster_id}
+                    rec.update({"updatedAt": iso(), "updatedBy": by})
+                    touched.append(name)
+            return touched
+        return _update_with_retry(self.store, self.KEY, mutate, {"users": {}})
+
     def delete(self, username: str) -> dict:
         if username in self.bootstrap_admins:
             raise bad_request("BOOTSTRAP_ADMIN", "Bootstrap admins are set by BOOTSTRAP_ADMINS "

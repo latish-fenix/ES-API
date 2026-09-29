@@ -1,14 +1,14 @@
 # ES Config Console — User Guide
 
-*Last updated 29 September 2026. The same guide, kept in sync, is also a shared Claude Doc.*
+*Last updated 29 September 2026 (adding clusters, and the data browser). The same guide, kept in sync, is also a shared Claude Doc.*
 
 The ES Config Console is the web page for reading and changing Elasticsearch configuration safely: every change is previewed first, saved to S3 before it is applied, and written to an audit log.
 
 - **Address:** <http://172.0.58.49/ui/> (the internal network only; `http://172.0.58.49/` opens it too)
-- **Who it's for:** anyone who changes cluster settings, index settings, mappings, templates, ILM policies or ingest pipelines, and the admins who manage who may do what
+- **Who it's for:** anyone who changes cluster settings, index settings, mappings, templates, ILM policies or ingest pipelines, developers who need to look at the documents in an index, and the admins who manage who may do what
 - **The one rule to remember:** every change goes **Edit → Dry run → Apply**. The dry run shows exactly what would change and touches nothing. Apply saves the current config as a snapshot first, so one click rolls it back
 
-What you can see and do depends on your access level on each cluster (see [Finding your way](#finding-your-way)). Admins also get the Users, Allowlist and Audit log pages.
+What you can see and do depends on your access level on each cluster (see [Finding your way](#finding-your-way)). Admins also get the Clusters, Users, Allowlist and Audit log pages.
 
 For scripts and automation, the same actions are available through the API; see [API_REFERENCE.md](API_REFERENCE.md) (also shared as the [ES Config API endpoint reference](https://claude.ai/code/artifact/21683e33-2775-49ce-ada3-c6a7ce220773)).
 
@@ -63,10 +63,10 @@ An admin sets your level per cluster. Each level includes the ones above it.
 
 | Level | You can |
 | --- | --- |
-| View | Read config, health, snapshots and the deleted-index list |
+| View | Read config, health, snapshots and the deleted-index list; search, read and export documents under **Data** |
 | Edit | Also dry run, apply and roll back changes |
 | Delete | Also delete indices |
-| Admin | Everything on every cluster, plus Users, Allowlist and Audit log |
+| Admin | Everything on every cluster, plus Clusters, Users, Allowlist and Audit log |
 
 Even with Edit or Delete, you can only change what the **allowlist** allows. A setting, index or policy that isn't on it is refused with "Not on the allowlist"; ask an admin if you need it.
 
@@ -185,6 +185,54 @@ The **Deleted through the API** tab lists every index deleted this way, who dele
 
 ![Deleted indices](images/11-deleted-indices.png)
 
+## Browsing data
+
+**Data** in the sidebar lets you search and read the documents in an index, filter them, pick columns, open one, and export the results. It's read-only: nothing here changes data. You need View access (or more) on the cluster. System indices (names starting with a dot) can't be opened.
+
+![Data browser with a query, a time range and two filters](images/23-data-browser.png)
+
+1. **Pick an index.** Type its name, or a pattern with `*` (for example `shoppremiumoutlets*-2024.*`), and press **Search**. The box suggests index names as you type. On the **Indices** page, **Browse** on any row opens it here.
+2. **Query** (optional): Lucene syntax, the same as Kibana's Lucene mode. Words separated by spaces must all match. See the examples below.
+3. **Time range:** choose the date field and a range (last 15 minutes up to last year, or **Custom range…** with from/to). Times are in your browser's time zone.
+4. **Filters:** **Add filter** → field, operator, value. Operators: *is*, *is not*, *is one of*, *is not one of*, *contains* (case-insensitive), *is between* (numbers or dates), *exists*, *does not exist*. Fields inside nested lists (like `line_items.sku`) work too. Click a filter to change it, × to remove it. Red filters exclude.
+
+| To find | Type in Query |
+| --- | --- |
+| One vendor | `vendor:2593` |
+| Two conditions | `vendor:2593 AND carrier:UPS` |
+| Either value | `status:(delivered OR in_transit)` |
+| Starts with | `order_info.order_number:SP0286*` |
+| A range | `order_info.total_price:[100 TO 200]` |
+| Not | `NOT status:delivered` |
+| Field is set | `_exists_:tracking_number` |
+
+![Add filter dialog](images/24-data-add-filter.png)
+
+### The results table
+
+- The count at the top is exact ("12,500 documents"), with how long Elasticsearch took
+- **Sort:** click a column heading with a small arrow (keyword, number and date fields). Click again for ascending, a third time to go back to relevance. Text fields can't be sorted
+- **Rows per page** 10, 25, 50 or 100, and the arrows at the bottom page through. Only the first 10,000 matches can be paged through (Elasticsearch's limit); narrow the search to reach the rest
+- **Columns** chooses what to show and in what order. Pick a whole object (`order_info`, shown as JSON) or a single field inside it (`order_info.order_number`). Your choice is remembered per index in this browser. **Reset to default** shows the first document's own fields again
+
+![Columns dialog](images/25-data-columns.png)
+
+The address bar keeps the index, query, filters, sort and page, so you can bookmark a search or send the link to a colleague (they still need View access).
+
+### Looking at one document
+
+Click a row. **Fields** lists every field with its type and value; **JSON** shows the document as stored. **Copy JSON** copies it. **Previous** / **Next** (or the arrow keys) move through the rows on the page.
+
+In **Fields**, **+** next to a value adds the filter "field is this value", and **−** adds "field is not this value".
+
+![A document with its fields](images/26-data-document.png)
+
+### Export
+
+**Export** downloads what the current search, filters and sort match: **CSV** (opens in Excel; the shown columns or every field), **JSON** or **NDJSON**, up to 10,000 documents. Values that could run as a spreadsheet formula are made safe.
+
+Exports and searches are recorded in the audit log with your email and the query, never the documents themselves. An export can hold customer details, so store and share the file accordingly.
+
 ## Templates, ILM policies and ingest pipelines
 
 Index templates, component templates, ILM policies and ingest pipelines share one screen: a list on the left, the selected item's full definition on the right.
@@ -213,6 +261,53 @@ An ILM policy is a schedule Elasticsearch follows on its own: for example roll o
 - Shortening a delete phase (say `min_age` from `30d` to `14d`) deletes every matching index older than 14 days within minutes
 - Rolling back restores the policy, **not** the deleted indices
 - So read the dry run's diff line by line, and check which indices use the policy before you apply
+
+## Admins: clusters
+
+Admins add, change and remove Elasticsearch clusters here, without touching the server or restarting anything. **Administration → Clusters** lists every cluster with its nodes and live status.
+
+![Clusters page](images/21-clusters.png)
+
+The **Added** column shows where each cluster comes from:
+
+| Badge | Where it's defined | What you can do here |
+| --- | --- | --- |
+| **In console** (with who added it, and when) | Added on this page. Saved on the API server in `data/clusters.managed.yaml`, **not in S3** | **Edit**, test, remove |
+| **clusters.yaml** | The server's `config/clusters.yaml` file | **Details** only; change it in the file on the server |
+
+**Check again** pings every cluster. A cluster that can't be reached shows the reason (for example a wrong password or a blocked port) in the Status column.
+
+### Add a cluster
+
+1. Click **Add cluster**.
+2. **Cluster id**: lowercase letters, digits, `-` and `_`, for example `elkm2-staging`. It appears in addresses and the audit log, and can't be changed later.
+3. **Display name** and **Description** (optional).
+4. **Node URLs**: one per line, with `http://` or `https://` and the port, for example `http://node1.elkm2.stage.int.fenixcommerce.com:9200`. Two or three nodes are better than one.
+5. **Authentication**: **Username and password** (usual), **API key**, or **None** (only for a cluster with security turned off). Use the `config_api` service account with the `config_api_writer` role (see `docs/es-lockdown.md`), not `elastic` or a personal login.
+6. For HTTPS with your own certificate authority, open **HTTPS and advanced settings** and paste the CA certificate (PEM). The same section has **Verify TLS certificates** (leave it on), the request timeout and tags.
+7. Click **Test connection**. Green shows the Elasticsearch version, cluster name, health and node count; red says what went wrong. Nothing is saved yet.
+8. Click **Add cluster**. It is tested again, saved, and appears in the cluster switcher straight away.
+
+![Add cluster dialog after a successful connection test](images/20-add-cluster.png)
+
+If the connection fails when you save, nothing is saved and the reason is shown. To save a cluster that is down right now (for example one still being built), tick **Save anyway, without a working connection** and save again.
+
+**Then give people access:** a new cluster is visible to admins only. Open **Users**, select each person and set their level on the new cluster (users with **All clusters** get it automatically).
+
+### Change or remove a cluster
+
+Click **Edit** on a cluster added in the console.
+
+![Edit cluster dialog](images/22-edit-cluster.png)
+
+- The saved password or API key is never shown. Leave the field empty to keep it, or type a new one to replace it (changing the username needs the password too)
+- A saved CA certificate can be replaced by pasting a new one, or removed with its checkbox
+- **Save** tests the connection first, like adding
+- **Remove cluster** asks you to type the cluster id. The console stops managing the cluster, everyone's access to it is removed, and its allowlist override is deleted. Nothing changes on the Elasticsearch cluster itself, and its snapshots and audit history stay in S3
+
+Every add, change and removal is in the audit log (`ADMIN_CLUSTER_CREATE`, `ADMIN_CLUSTER_UPDATE`, `ADMIN_CLUSTER_DELETE`) with who did it; passwords and API keys never are.
+
+**Where the credentials live.** Clusters added here, with their passwords or API keys, are kept in one file on the API server (`data/clusters.managed.yaml`, readable only by the API). They are never written to S3, never returned by the API, and never shown in the console after you save them.
 
 ## Admins: users and passwords
 
@@ -285,7 +380,7 @@ The audit log records every change, dry run, rollback, delete, sign-in and admin
 
 ![Audit log with a rejected dry run expanded](images/18-audit-log.png)
 
-- **Filters:** date (UTC), cluster, user, action (UPDATE, ROLLBACK, DRY\_RUN, INDEX\_DELETE, ADMIN\_\*, AUTH\_\*) and outcome (Success, Rejected, Failed, No change). The filters stay in the address bar, so you can share a filtered view
+- **Filters:** date (UTC), cluster, user, action (UPDATE, ROLLBACK, DRY\_RUN, INDEX\_DELETE, DATA\_SEARCH, DATA\_EXPORT, ADMIN\_\* including ADMIN\_CLUSTER\_\*, AUTH\_\*) and outcome (Success, Rejected, Failed, No change). The filters stay in the address bar, so you can share a filtered view
 - **Expand a row** (click it) to see the error code and message, blocked keys, the reason given, the diff of what changed, the change and request IDs, and the source IP
 - **Export JSON** downloads what the filters show
 - The page shows up to 500 events; narrow the filters if there are more
@@ -309,6 +404,13 @@ A red box always means nothing was changed; its last line shows the error code a
 | Elasticsearch rejected the change | Unknown setting or invalid value | The message has Elasticsearch's reason; fix the JSON |
 | Invalid JSON | A typo in the editor (red underline) | Fix the highlighted line |
 | Can't reach the cluster | The API server can't connect to Elasticsearch | Tell whoever runs the API server |
+| System and hidden indices can't be browsed | The name or pattern starts with a dot | Browse the normal index instead |
+| Only the first 10,000 results can be paged through | You paged past Elasticsearch's limit | Add a filter or time range, or change the sort |
+| The API's Elasticsearch account may not read documents | The service account lacks the `read` privilege | Whoever runs the server: add `read` to the `config_api_writer` role (`docs/es-lockdown.md`) |
+| Can't connect (adding or editing a cluster) | Wrong URL, port, password or CA certificate, or the security group blocks the API server | Fix the setting the message names and **Test connection** again |
+| A cluster with this id already exists | The id is used by another cluster | Choose another id |
+| Defined in config/clusters.yaml | That cluster is in the server's file | Change it in the file on the server |
+| The clusters file on the server can't be written | The server's `data` folder isn't writable by the API | Whoever runs the server: `sudo chown 10001:10001 data && chmod 700 data` |
 | Your session ended | 12 hours passed, or your password was changed or reset | Sign in again |
 | Account locked | 5 wrong passwords | Wait 15 minutes or ask an admin to reset your password |
 
@@ -332,4 +434,7 @@ A red box always means nothing was changed; its last line shows the error code a
 - **Who can see my changes?** Admins, in the audit log, with your email, time, reason and diff.
 - **Do I need to sign out when an admin changes my access?** No, it applies to your next click.
 - **Can scripts do the same things?** Yes, through the API with a token from sign-in; see [API_REFERENCE.md](API_REFERENCE.md).
+- **Can I change a document in Data?** No, it's read-only. Changes to data go through your applications.
+- **Why don't I see `.kibana` or other dot indices in Data?** System indices are never shown, on purpose.
+- **How do I add a new Elasticsearch cluster?** Admins: **Administration → Clusters → Add cluster**; then give people access on **Users**.
 - **Is there SSO?** Not yet; sign-in is by email and password.

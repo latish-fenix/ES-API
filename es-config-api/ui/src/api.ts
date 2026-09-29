@@ -107,15 +107,35 @@ export interface Cluster {
   permission: Level;
 }
 
-export interface AdminCluster {
-  id: string;
-  name?: string | null;
-  description?: string | null;
-  hosts: string[];
+export interface ConnectionTest {
   reachable: boolean;
   version?: string;
   clusterName?: string;
+  clusterUuid?: string;
+  health?: string;
+  numberOfNodes?: number;
+  warnings?: string[];
   error?: string;
+  errorCode?: string;
+}
+
+export interface AdminCluster extends Partial<ConnectionTest> {
+  id: string;
+  name: string;
+  description: string;
+  tags: string[];
+  hosts: string[];
+  authType: "basic" | "api_key" | "none";
+  username: string | null;
+  verifyCerts: boolean;
+  hasCaCert: boolean;
+  requestTimeout: number;
+  source: "file" | "managed";
+  editable: boolean;
+  createdAt?: string;
+  createdBy?: string;
+  updatedAt?: string;
+  updatedBy?: string;
 }
 
 export interface Health {
@@ -267,6 +287,99 @@ export interface AuditEvent {
   targetUser?: string;
   allowlist?: string;
   [k: string]: unknown;
+}
+
+// ------------------------------------------------------------ data browser
+
+export interface DataField {
+  name: string;
+  type: string;
+  types: string[] | null;
+  searchable: boolean;
+  aggregatable: boolean;
+  object: boolean;
+}
+
+export interface DataFields {
+  index: string;
+  indices: string[];
+  fields: DataField[];
+  nestedPaths: string[];
+  dateFields: string[];
+}
+
+export type FilterOp = "is" | "is_not" | "one_of" | "not_one_of" | "exists" | "not_exists" | "between" | "contains";
+
+export interface DataFilter {
+  field: string;
+  op: FilterOp;
+  value?: string;
+  values?: string[];
+  gte?: string;
+  lte?: string;
+}
+
+export interface DataSort {
+  field: string;
+  order: "asc" | "desc";
+  unmappedType?: string;
+}
+
+export interface DataSearchBody {
+  query: string;
+  filters: DataFilter[];
+  timeRange?: { field: string; gte?: string; lte?: string } | null;
+  sort: DataSort[];
+  from: number;
+  size: number;
+}
+
+export interface DataHit {
+  _index: string;
+  _id: string;
+  _score: number | null;
+  _source: Record<string, unknown>;
+}
+
+export interface DataSearchResult {
+  total: number;
+  totalRelation: "eq" | "gte";
+  took: number;
+  timedOut: boolean;
+  from: number;
+  size: number;
+  hits: DataHit[];
+  shardFailures?: string[];
+  maxWindow: number;
+}
+
+/** POST that returns a file (export). Errors come back as the usual ApiError. */
+export async function downloadPost(path: string, body: unknown): Promise<{ blob: Blob; filename: string; rows: number }> {
+  let res: globalThis.Response;
+  try {
+    res = await fetch(buildUrl(path), {
+      method: "POST",
+      headers: { Accept: "*/*", "Content-Type": "application/json", "X-Requested-With": "es-config-ui" },
+      credentials: "same-origin",
+      body: JSON.stringify(body),
+    });
+  } catch {
+    throw new ApiError(0, "NETWORK_ERROR", "Can't reach the API. Check your connection and try again.", null, null);
+  }
+  if (!res.ok) {
+    let err: { code?: string; message?: string; details?: unknown } | undefined;
+    try {
+      err = (await res.json())?.error;
+    } catch {
+      err = undefined;
+    }
+    const e = new ApiError(res.status, err?.code ?? `HTTP_${res.status}`, err?.message ?? "Export failed", err?.details ?? null, res.headers.get("x-request-id"));
+    if (res.status === 401) onUnauthenticated?.();
+    throw e;
+  }
+  const cd = res.headers.get("content-disposition") ?? "";
+  const filename = /filename="([^"]+)"/.exec(cd)?.[1] ?? "export";
+  return { blob: await res.blob(), filename, rows: Number(res.headers.get("x-export-rows") ?? 0) };
 }
 
 // ------------------------------------------------------------ path helpers

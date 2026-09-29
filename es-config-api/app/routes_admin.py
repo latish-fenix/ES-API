@@ -9,7 +9,6 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from .auth import credentials_csv, generate_password, hash_password, is_email, normalize_username
-from .clusters import es_call
 from .errors import ApiError, bad_request, conflict, not_found
 from .identity import User, require_admin
 from .repos import validate_permissions
@@ -62,23 +61,7 @@ def _audit(request: Request, admin: User, action: str, **fields: Any) -> None:
     })
 
 
-# ------------------------------------------------------------------ clusters
-@router.get("/clusters", summary="All registered clusters with reachability")
-def admin_clusters(request: Request, check: bool = Query(True, description="Ping each cluster"),
-                   admin: User = Depends(require_admin)):
-    registry = request.app.state.registry
-    items = []
-    for c in registry.all():
-        item = {**c.public(), "hosts": c.hosts, "authType": c.auth_type}
-        if check:
-            try:
-                info = es_call(registry.client(c.id), "GET", "/")
-                item.update(reachable=True, version=info.get("version", {}).get("number"),
-                            clusterName=info.get("cluster_name"))
-            except ApiError as e:
-                item.update(reachable=False, error=e.message)
-        items.append(item)
-    return {"items": items}
+# Clusters: see routes_clusters.py
 
 
 # --------------------------------------------------------------------- users

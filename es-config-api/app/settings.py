@@ -22,6 +22,9 @@ class Settings:
 
     # Clusters
     clusters_file: str = "/app/config/clusters.yaml"
+    # Clusters added through the API/UI are written here (on the server, never to S3).
+    # Empty = adding clusters through the API is off.
+    managed_clusters_file: str = ""
 
     # Identity / permissions
     auth_mode: str = "password"               # "password" (production) | "header" (dev/tests only)
@@ -53,6 +56,7 @@ class Settings:
             s3_sse=env("S3_SSE") or None,
             local_store_dir=env("LOCAL_STORE_DIR", "./.local-store"),
             clusters_file=env("CLUSTERS_FILE", "/app/config/clusters.yaml"),
+            managed_clusters_file=env("MANAGED_CLUSTERS_FILE", "/app/data/clusters.managed.yaml"),
             auth_mode=env("AUTH_MODE", "password").lower(),
             user_header=env("USER_HEADER", "X-User"),
             bootstrap_admins=[a.lower() for a in _csv(env("BOOTSTRAP_ADMINS"))],

@@ -64,7 +64,7 @@ path.logs: $logs
 Write-Step "Creating roles and users (safe to repeat)"
 Invoke-Es PUT "/_security/role/config_api_writer" @{
     cluster = @("monitor", "manage", "manage_ilm", "manage_index_templates", "manage_pipeline")
-    indices = @(@{ names = @("*"); privileges = @("monitor", "view_index_metadata", "manage") })
+    indices = @(@{ names = @("*"); privileges = @("monitor", "view_index_metadata", "manage", "read") })
 } | Out-Null
 Invoke-Es POST "/_security/user/$SvcUser" @{ password = $SvcPassword; roles = @("config_api_writer") } | Out-Null
 Invoke-Es PUT "/_security/role/config_reader" @{

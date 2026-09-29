@@ -10,3 +10,5 @@ local-test/.store/
 local-test/clusters.local.yaml
 ui/node_modules/
 *.tsbuildinfo
+local-test/clusters.managed.yaml*
+data/

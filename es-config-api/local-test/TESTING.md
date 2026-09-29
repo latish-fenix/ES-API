@@ -18,7 +18,7 @@ S3 instead, run `2-start-api-s3.cmd`. It uses your `fenix-prod` profile and
 
 Then open **http://localhost:8080/ui/** and sign in as
 `latish.madapada@fenixcommerce.com` with the password `Local-Test-Admin-2026`. Section 1a
-below is a 10-minute tour of the web console. Sections 2 and 3 test the same things through
+below is a 15-minute tour of the web console. Sections 2 and 3 test the same things through
 the raw API at **http://localhost:8080/docs** (click an endpoint, **Try it out**, **Execute**).
 
 ## 1a. Tour of the web console
@@ -40,6 +40,16 @@ the raw API at **http://localhost:8080/docs** (click an endpoint, **Try it out**
 | 11 | As alice: **Change password** (bottom left) | Set a new password | "Password changed" |
 | 12 | Sign in as the admin: **Audit log** | Expand a *Rejected* row | Error code, message, blocked keys, request id |
 | 13 | **Indices** → `products-demo` → **Delete** | Type the name and a reason | The index is gone; see it under "Deleted through the API" |
+| 14 | **Clusters** → **Add cluster** | Id `local-copy`, node URL `http://127.0.0.1:9200`, username `config_api`, password `wrong`; **Test connection** | Red "Can't connect", with the Elasticsearch authentication error |
+| 15 | same | Password `svc-pass-123`, **Test connection**, then **Add cluster** | Green "Connected · Elasticsearch 8.17.1"; the row shows **In console**; `local-copy` is in the cluster switcher; `local-test\clusters.managed.yaml` now holds it (not the `.store` / S3 folder) |
+| 16 | same | **Edit** `local-copy`, change the display name, leave the password empty, **Save**; then **Details** on `local` | Saved, still connects (password kept); `local` is read-only ("Defined in config/clusters.yaml") |
+| 17 | same | **Edit** `local-copy` → **Remove cluster**, type `local-copy`, confirm | Gone from the list and the switcher; the audit log shows `ADMIN_CLUSTER_CREATE`, `_UPDATE`, `_DELETE` |
+| 18 | **Data** (or **Indices** → `products-demo` → **Browse**) | Index `products-demo`; query blank, **Search**; click a column heading; **Add filter** on any field; click a row | A document count, sorted rows, the filter as a chip, the document's fields and JSON |
+| 19 | same | **Export** → CSV → **Download**; then type `.security*` as the index and **Search** | A CSV opens in Excel; the system index is refused ("System and hidden indices … can't be browsed"). The audit log shows `DATA_SEARCH` and `DATA_EXPORT` |
+
+Steps 18–19 need the `config_api` account to have the `read` privilege. If you set up
+Elasticsearch before the data browser existed, run `1-start-elasticsearch.cmd` again (it's safe
+to repeat) to update the role.
 
 **Sign in.** In /docs, open `POST /api/v1/auth/login`, click **Try it out**, send
 `{"username": "latish.madapada@fenixcommerce.com", "password": "Local-Test-Admin-2026"}`
@@ -159,7 +169,7 @@ With Elasticsearch running (step 1), from the `es-config-api` folder:
 .venv\Scripts\python -m pytest -q
 ```
 
-This runs 50 tests against your local Elasticsearch, with S3 simulated. With the API
+This runs 57 tests against your local Elasticsearch, with S3 simulated. With the API
 running (step 2), you can also run:
 
 ```cmd

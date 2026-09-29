@@ -9,10 +9,11 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 
-from . import routes_admin, routes_auth, routes_config
+from . import routes_admin, routes_auth, routes_clusters, routes_config, routes_data
 from .auth import hash_password, password_problems
 from .clusters import ClusterRegistry, load_clusters
 from .errors import ApiError
+from .data_browser import DataBrowser
 from .index_delete import IndexDeleteService
 from .repos import AllowlistRepo, AuditRepo, LockRepo, SnapshotRepo, UsersRepo
 from .service import ChangeService
@@ -28,7 +29,8 @@ def create_app(settings: Settings | None = None, store: ObjectStore | None = Non
     if store is None:
         settings.validate()
         store = build_store(settings)
-    registry = registry or ClusterRegistry(load_clusters(settings.clusters_file))
+    registry = registry or ClusterRegistry(load_clusters(settings.clusters_file),
+                                           settings.managed_clusters_file or None)
 
     app = FastAPI(
         title="ES Config API",
@@ -49,6 +51,7 @@ def create_app(settings: Settings | None = None, store: ObjectStore | None = Non
     app.state.service = ChangeService(
         registry, SnapshotRepo(store), locks, app.state.allowlist, app.state.audit,
     )
+    app.state.data = DataBrowser(registry, app.state.audit)
     app.state.index_delete = IndexDeleteService(registry, store, locks, app.state.allowlist,
                                                 app.state.audit)
     if settings.auth_mode == "password":
@@ -82,8 +85,10 @@ def create_app(settings: Settings | None = None, store: ObjectStore | None = Non
         return {"status": "ok", "clusters": len(registry.all())}
 
     app.include_router(routes_auth.router)
+    app.include_router(routes_data.router)  # before routes_config: its /{type}/{name} paths are generic
     app.include_router(routes_config.router)
     app.include_router(routes_admin.router)
+    app.include_router(routes_clusters.router)
     _mount_ui(app)
     return app
 

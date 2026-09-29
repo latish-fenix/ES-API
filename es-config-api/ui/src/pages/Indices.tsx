@@ -74,6 +74,7 @@ export function Indices() {
                         <td>{r.status}</td>
                         <td className="num">{num(r["docs.count"])}</td>
                         <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                          <Link className="btn btn-ghost btn-sm" to={`${c}/data?index=${enc(r.index)}`}>Browse</Link>
                           <Link className="btn btn-ghost btn-sm" to={`${c}/indices/${enc(r.index)}/settings`}>Settings</Link>
                           <Link className="btn btn-ghost btn-sm" to={`${c}/indices/${enc(r.index)}/mapping`}>Mapping</Link>
                           {canDelete && (deletable(r.index) ? (

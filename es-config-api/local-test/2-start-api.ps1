@@ -50,6 +50,8 @@ clusters:
 "@ | Set-Content -Encoding ascii $clusters
 
 $env:CLUSTERS_FILE = $clusters
+# Clusters added in the console (Administration > Clusters) are saved here
+$env:MANAGED_CLUSTERS_FILE = Join-Path $PSScriptRoot "clusters.managed.yaml"
 $env:ES_LOCAL_PASSWORD = $SvcPassword
 $env:AUTH_MODE = "password"
 $env:BOOTSTRAP_ADMINS = $AdminUser

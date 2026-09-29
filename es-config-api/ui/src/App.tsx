@@ -4,9 +4,11 @@ import { Page, Shell } from "./components/Shell";
 import { Empty, Loading } from "./components/ui";
 import { Allowlist } from "./pages/admin/Allowlist";
 import { Audit } from "./pages/admin/Audit";
+import { Clusters } from "./pages/admin/Clusters";
 import { Users } from "./pages/admin/Users";
 import { ChangePassword } from "./pages/ChangePassword";
 import { ClusterSettings } from "./pages/ClusterSettings";
+import { Data } from "./pages/Data";
 import { IndexDetail } from "./pages/IndexDetail";
 import { Indices } from "./pages/Indices";
 import { Login } from "./pages/Login";
@@ -26,7 +28,7 @@ function Home() {
     <Page crumbs={[{ label: "Home" }]} title="No clusters">
       <section className="card">
         <Empty title="You don't have access to any cluster yet">
-          {me.admin ? <>Add clusters to <code>config/clusters.yaml</code> on the server, then restart the API.</> : "Ask an admin to give you access."}
+          {me.admin ? <><Link to="/admin/clusters">Add a cluster</Link> in Administration, or list it in <code>config/clusters.yaml</code> on the server.</> : "Ask an admin to give you access."}
         </Empty>
       </section>
     </Page>
@@ -52,6 +54,7 @@ export function App() {
         <Route path="c/:clusterId" element={<Overview />} />
         <Route path="c/:clusterId/cluster-settings" element={<ClusterSettings />} />
         <Route path="c/:clusterId/indices" element={<Indices />} />
+        <Route path="c/:clusterId/data" element={<Data />} />
         <Route path="c/:clusterId/indices/:index" element={<IndexDetail />} />
         <Route path="c/:clusterId/indices/:index/:part" element={<IndexDetail />} />
         {NAMED_TYPES.map((t) => (
@@ -61,6 +64,7 @@ export function App() {
           <Route key={`${t}-name`} path={`c/:clusterId/${t}/:name`} element={<NamedResources key={t} type={t} />} />
         ))}
         <Route path="account/password" element={<ChangePassword />} />
+        <Route path="admin/clusters" element={<RequireAdmin><Clusters /></RequireAdmin>} />
         <Route path="admin/users" element={<RequireAdmin><Users /></RequireAdmin>} />
         <Route path="admin/allowlist" element={<RequireAdmin><Allowlist /></RequireAdmin>} />
         <Route path="admin/audit" element={<RequireAdmin><Audit /></RequireAdmin>} />

@@ -15,7 +15,7 @@ export function useClusters() {
 export function useAdminClusters(enabled: boolean) {
   return useQuery({
     queryKey: ["admin-clusters"],
-    queryFn: () => get<{ items: AdminCluster[] }>("/admin/clusters").then((r) => r.items),
+    queryFn: () => get<{ items: AdminCluster[]; managedFile: string | null }>("/admin/clusters").then((r) => r.items),
     enabled,
     staleTime: 5 * 60_000,
   });

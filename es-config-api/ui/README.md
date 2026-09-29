@@ -89,8 +89,9 @@ ui/
 │       ├── Login.tsx, ChangePassword.tsx
 │       ├── Overview.tsx, ClusterSettings.tsx
 │       ├── Indices.tsx (+ delete dialog), IndexDetail.tsx (settings / mapping tabs)
+│       ├── Data.tsx             data browser: query, filters, time range, columns, sort, document view, export
 │       ├── NamedResources.tsx   index/component templates, ILM policies, ingest pipelines
-│       └── admin/Users.tsx, admin/Allowlist.tsx, admin/Audit.tsx
+│       └── admin/Clusters.tsx, admin/Users.tsx, admin/Allowlist.tsx, admin/Audit.tsx
 ```
 
 ### Routes
@@ -103,9 +104,10 @@ ui/
 | `/c/:cluster/cluster-settings` | Cluster settings | view+ (edit to change) |
 | `/c/:cluster/indices` (`?tab=deleted`) | Indices / deleted indices | view+ |
 | `/c/:cluster/indices/:index/settings` · `/mapping` | Index detail | view+ |
+| `/c/:cluster/data?index=&q=&f=&tf=&tg=&tl=&sort=&from=&size=&cols=` | Data browser (all search state in the URL, so a search can be bookmarked or shared) | view+ |
 | `/c/:cluster/{index-templates,component-templates,ilm-policies,ingest-pipelines}[/:name]` (`?new=1`) | Named resources | view+ |
 | `/account/password` | Change password | signed in |
-| `/admin/users` · `/admin/allowlist` · `/admin/audit` | Administration | admin |
+| `/admin/clusters` · `/admin/users` · `/admin/allowlist` · `/admin/audit` | Administration | admin |
 
 ## How it works
 
@@ -133,6 +135,17 @@ TanStack Query caches every GET under a key such as `["config", path]`, `["indic
 or `["admin-users"]`. Writes are `useMutation`s that invalidate the affected keys on success.
 Client errors (4xx) are never retried; network errors and 5xx are retried twice. Cluster
 health refreshes every 60 s.
+
+The data browser (`pages/Data.tsx`) keeps its search in the URL and runs it with TanStack Query
+(`["data-search", cluster, index, body]`, previous page kept while the next loads). Chosen
+columns are remembered per cluster + index in `localStorage` (wrapped in try/catch); the
+default is the first document's top-level fields. Export uses `downloadPost` in `api.ts`
+(a fetch that returns a Blob) because the response is a file, not JSON.
+
+Adding, editing or removing a cluster (`pages/admin/Clusters.tsx`) invalidates
+`admin-clusters`, `clusters`, `me` and `admin-users`, so the cluster switcher and the Users
+page update at once. Passwords and API keys are only ever sent, never received: the edit form
+leaves them empty and the API keeps the saved value.
 
 ### The change flow (`ChangeFlow.tsx`)
 
@@ -199,9 +212,9 @@ code goes in the small print, not the headline).
 - `npm run build` must pass (it type-checks).
 - Backend tests cover how the UI is served: `pytest -q tests/test_auth.py -k "security_headers or auth_config"` checks the
   SPA fallback, cache headers and security headers.
-- Manual end-to-end check: the 13-step tour in `local-test/TESTING.md` §1a (about 10 minutes)
+- Manual end-to-end check: the 19-step tour in `local-test/TESTING.md` §1a (about 10 minutes)
   covers sign-in, dry run/apply/rollback, mappings, ILM, pipelines, users + CSV, allowlist,
-  audit and delete.
+  audit, delete, adding / editing / removing a cluster, and the data browser.
 - The UI was verified end to end with Playwright (Chromium) against Elasticsearch 8.17.1,
   including a view-only user, dark mode, 1280 px and phone widths. Those scripts are not in
   the repo yet.
