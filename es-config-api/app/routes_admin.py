@@ -18,7 +18,7 @@ router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
 class UserBody(BaseModel):
     admin: bool = False
     clusters: dict[str, str] = Field(default_factory=dict,
-                                     description="{clusterId or '*': 'view' | 'edit'}")
+                                     description="{clusterId or '*': 'view' | 'edit' | 'delete'}")
 
 
 def _audit(request: Request, admin: User, action: str, **fields: Any) -> None:

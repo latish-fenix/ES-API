@@ -63,6 +63,9 @@ def prefix(es):
                                                   "expand_wildcards": "all"}, ok=False) or []:
         if row["index"].startswith("cfgtest-"):
             es("DELETE", f"/{row['index']}", ok=False)
+    for ds in (es("GET", "/_data_stream", ok=False) or {}).get("data_streams", []):
+        if ds["name"].startswith(p):
+            es("DELETE", f"/_data_stream/{ds['name']}", ok=False)
     for t in (es("GET", "/_index_template", ok=False) or {}).get("index_templates", []):
         if t["name"].startswith(p):
             es("DELETE", f"/_index_template/{t['name']}", ok=False)

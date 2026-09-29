@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 from . import routes_admin, routes_config
 from .clusters import ClusterRegistry, load_clusters
 from .errors import ApiError
+from .index_delete import IndexDeleteService
 from .repos import AllowlistRepo, AuditRepo, LockRepo, SnapshotRepo, UsersRepo
 from .service import ChangeService
 from .settings import Settings
@@ -39,10 +40,12 @@ def create_app(settings: Settings | None = None, store: ObjectStore | None = Non
     app.state.users = UsersRepo(store, settings.bootstrap_admins)
     app.state.allowlist = AllowlistRepo(store)
     app.state.audit = AuditRepo(store)
+    locks = LockRepo(store, settings.lock_ttl_seconds)
     app.state.service = ChangeService(
-        registry, SnapshotRepo(store), LockRepo(store, settings.lock_ttl_seconds),
-        app.state.allowlist, app.state.audit,
+        registry, SnapshotRepo(store), locks, app.state.allowlist, app.state.audit,
     )
+    app.state.index_delete = IndexDeleteService(registry, store, locks, app.state.allowlist,
+                                                app.state.audit)
 
     @app.middleware("http")
     async def request_id(request: Request, call_next):

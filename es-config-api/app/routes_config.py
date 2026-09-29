@@ -148,6 +148,24 @@ def previous_index_part(cluster_id: str, index: str, part: IndexPart, request: R
     return svc(request).previous(user, cluster_id, INDEX_PART_TYPE[part], index)
 
 
+@router.delete("/clusters/{cluster_id}/indices/{index}",
+               summary="Delete an index (permanent: documents cannot be recovered)")
+def delete_index(cluster_id: str, index: str, request: Request,
+                 confirm: str | None = Query(None, description="Repeat the index name exactly"),
+                 reason: str | None = Query(None, description="Why; required unless dryRun"),
+                 dryRun: bool = Query(False, description="Show what would be deleted"),
+                 user: User = Depends(current_user)):
+    return request.app.state.index_delete.delete(user, meta(request), cluster_id, index,
+                                                 confirm, reason, dryRun)
+
+
+@router.get("/clusters/{cluster_id}/deleted-indices",
+            summary="Indices deleted through the API, with their saved settings and mappings")
+def deleted_indices(cluster_id: str, request: Request, index: str | None = Query(None),
+                    user: User = Depends(current_user)):
+    return request.app.state.index_delete.list_tombstones(user, cluster_id, index)
+
+
 # ------------------------------------------ templates, ILM policies, pipelines
 @router.get("/clusters/{cluster_id}/{config_type}", summary="List resource names")
 def list_named(cluster_id: str, config_type: NamedType, request: Request,

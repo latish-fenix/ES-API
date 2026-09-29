@@ -13,11 +13,11 @@ from .util import iso, matches_any, new_id, utcnow
 
 log = logging.getLogger("es_config_api.audit")
 
-LEVELS = ("view", "edit")
+LEVELS = ("view", "edit", "delete")   # each level includes the ones before it
 
 CONFIG_TYPES = (
     "cluster-settings", "index-settings", "index-mappings", "index-templates",
-    "component-templates", "ilm-policies", "ingest-pipelines",
+    "component-templates", "ilm-policies", "ingest-pipelines", "index-delete",
 )
 
 
@@ -175,7 +175,7 @@ class AllowlistRepo:
         out = []
         for n in names:
             ok = matches_any(n, allow) and not matches_any(n, deny)
-            if ok and config_type == "index-mappings":
+            if ok and config_type in ("index-mappings", "index-delete"):
                 ok = _dot_ok(n, allow)
             if not ok:
                 out.append(n)
@@ -342,7 +342,7 @@ def validate_permissions(clusters: Any, known: set[str]) -> dict[str, str]:
                           {"knownClusters": sorted(known)})
     bad = {k: v for k, v in clusters.items() if v not in LEVELS}
     if bad:
-        raise bad_request("INVALID_PERMISSIONS", "Permission level must be 'view' or 'edit'", bad)
+        raise bad_request("INVALID_PERMISSIONS", "Permission level must be 'view', 'edit' or 'delete'", bad)
     return dict(clusters)
 
 

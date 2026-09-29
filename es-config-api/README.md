@@ -69,7 +69,8 @@ curl $H -X PUT $API/admin/allowlist -d '{
 # Dot (system/hidden) indices only match patterns that start with "." (e.g. ".my-app-*").
 # A config type missing from the allowlist is fully locked.
 
-# Users: "view" = read only, "edit" = change / dry-run / roll back; "*" = every cluster
+# Users: "view" = read only, "edit" = change / dry-run / roll back,
+#        "delete" = edit + delete indices; "*" = every cluster
 curl $H -X PUT $API/admin/users/priya -d '{"clusters": {"prod-us": "edit", "staging": "edit"}}'
 curl $H -X PUT $API/admin/users/sam   -d '{"clusters": {"*": "view"}}'
 curl $H -X PUT $API/admin/users/sam/permissions -d '{"staging": "edit", "prod-us": "view"}'
@@ -110,6 +111,13 @@ curl $H -X POST $API/clusters/prod-us/cluster-settings/rollback -d '{"reason": "
 | Component template | `GET/PUT /clusters/{id}/component-templates/{name}` | `POST …/rollback` | full body |
 | ILM policy | `GET/PUT /clusters/{id}/ilm-policies/{name}` | `POST …/rollback` | `{"policy": {...}}` |
 | Ingest pipeline | `GET/PUT /clusters/{id}/ingest-pipelines/{name}` | `POST …/rollback` | full body; add `sampleDocs` to dry-run on real docs |
+
+**Deleting an index:** `DELETE /clusters/{id}/indices/{index}?dryRun=true` shows what would go.
+To delete it for real, add `confirm=<index name>&reason=...`. The documents can't be recovered.
+The API saves the settings, mappings and aliases to S3 under `deleted-indices/`, listed by
+`GET /clusters/{id}/deleted-indices`, so an *empty* index can be recreated. Deleting needs the
+`delete` permission level (`view` < `edit` < `delete`) and a matching `index-delete`
+allowlist pattern. Aliases, data-stream names and a data stream's current write index are refused.
 
 Also available: `GET /clusters/{id}/health`, `GET /clusters/{id}/indices`,
 `GET /clusters/{id}/{type}` (list names), and `…/previous` (the stored snapshot) for

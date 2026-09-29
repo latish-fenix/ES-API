@@ -32,12 +32,12 @@ class User:
 
     def level(self, cluster_id: str) -> str | None:
         if self.admin:
-            return "edit"
+            return "delete"
         return self.clusters.get(cluster_id) or self.clusters.get("*")
 
     def can(self, cluster_id: str, needed: str) -> bool:
-        lvl = self.level(cluster_id)
-        return lvl == "edit" or (needed == "view" and lvl == "view")
+        order = {"view": 1, "edit": 2, "delete": 3}
+        return order.get(self.level(cluster_id) or "", 0) >= order[needed]
 
 
 def resolve_username(request: Request) -> str:
