@@ -1,6 +1,7 @@
 """End-to-end smoke test against a RUNNING API (real ES + real storage).
 
-    python scripts/smoke_test.py --api http://localhost:8080 --admin latish --cluster local \
+    python scripts/smoke_test.py --api http://localhost:8080 --admin you@company.com \
+        --admin-password '...' --cluster local \
         --es-url http://127.0.0.1:9200 --es-user elastic --es-password ...
 
 It changes one harmless cluster setting (indices.recovery.max_bytes_per_sec) and creates
@@ -29,7 +30,8 @@ def check(name: str, ok: bool, detail: str = "") -> bool:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--api", default="http://localhost:8080")
-    ap.add_argument("--admin", required=True, help="a BOOTSTRAP_ADMINS username")
+    ap.add_argument("--admin", required=True, help="an admin's email (e.g. a BOOTSTRAP_ADMINS user)")
+    ap.add_argument("--admin-password", default=None, help="password mode: the admin's password")
     ap.add_argument("--cluster", required=True)
     ap.add_argument("--es-url", required=True, help="direct ES access, to simulate drift")
     ap.add_argument("--es-user", default="elastic")
@@ -37,8 +39,16 @@ def main() -> int:
     a = ap.parse_args()
 
     api = a.api.rstrip("/") + "/api/v1"
-    admin = {"X-User": a.admin}
-    tester = {"X-User": "smoke-tester"}
+    tester_name = "smoke-tester@example.com"
+    if a.admin_password:  # AUTH_MODE=password
+        r = requests.post(f"{api}/auth/login", json={"username": a.admin, "password": a.admin_password})
+        if not r.ok:
+            print("admin login failed:", r.text)
+            return 1
+        admin = {"Authorization": f"Bearer {r.json()['token']}"}
+    else:  # AUTH_MODE=header
+        admin = {"X-User": a.admin}
+    tester = None  # set after the tester user is created
     c = f"{api}/clusters/{a.cluster}"
     tpl = f"smoke-{uuid.uuid4().hex[:6]}"
 
@@ -59,11 +69,20 @@ def main() -> int:
             "index-templates": {"allow": ["smoke-*"], "indexPatterns": ["smoke-*"]}})
         check("set allowlist", r.ok, r.text)
 
-        r = s.put(f"{api}/admin/users/smoke-tester", headers=admin, json={"clusters": {a.cluster: "view"}})
+        r = s.post(f"{api}/admin/users", headers=admin,
+                   json={"username": tester_name, "clusters": {a.cluster: "view"}})
         check("create view-only user", r.ok, r.text)
+        if a.admin_password:
+            pw = r.json()["credentials"]["password"]
+            check("generated password returned once", bool(pw) and len(pw) == 16, r.text)
+            lr = s.post(f"{api}/auth/login", json={"username": tester_name, "password": pw})
+            check("new user can sign in", lr.ok, lr.text)
+            tester = {"Authorization": f"Bearer {lr.json().get('token', '')}"}
+        else:
+            tester = {"X-User": tester_name}
         r = s.put(f"{c}/cluster-settings", headers=tester, json={"config": {KEY: "71mb"}, "reason": "x"})
         check("view-only user cannot change (403)", r.status_code == 403, r.text)
-        s.put(f"{api}/admin/users/smoke-tester/permissions", headers=admin, json={a.cluster: "edit"})
+        s.put(f"{api}/admin/users/{tester_name}/permissions", headers=admin, json={a.cluster: "edit"})
 
         g = s.get(f"{c}/cluster-settings", headers=tester)
         check("get cluster settings + ETag", g.ok and "ETag" in g.headers, g.text)
@@ -112,13 +131,13 @@ def main() -> int:
 
         today = datetime.now(timezone.utc).date().isoformat()
         r = s.get(f"{api}/admin/audit", headers=admin,
-                  params={"date": today, "clusterId": a.cluster, "user": "smoke-tester"})
+                  params={"date": today, "clusterId": a.cluster, "user": tester_name})
         acts = {e["action"] for e in r.json().get("items", [])}
         check("audit log has UPDATE, ROLLBACK, DRY_RUN", {"UPDATE", "ROLLBACK", "DRY_RUN"} <= acts, str(acts))
     finally:
         es("PUT", "/_cluster/settings", json={"persistent": {KEY: None}})
         es("DELETE", f"/_index_template/{tpl}")
-        s.delete(f"{api}/admin/users/smoke-tester", headers=admin)
+        s.delete(f"{api}/admin/users/{tester_name}", headers=admin)
 
     failed = [n for n, ok, _ in results if not ok]
     print(f"\n{len(results) - len(failed)}/{len(results)} checks passed")

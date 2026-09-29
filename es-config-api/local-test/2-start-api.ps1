@@ -51,7 +51,10 @@ clusters:
 
 $env:CLUSTERS_FILE = $clusters
 $env:ES_LOCAL_PASSWORD = $SvcPassword
+$env:AUTH_MODE = "password"
 $env:BOOTSTRAP_ADMINS = $AdminUser
+$env:BOOTSTRAP_ADMIN_PASSWORD = $AdminPassword
+$env:SESSION_SECRET = -join ((1..48) | ForEach-Object { '{0:x}' -f (Get-Random -Maximum 16) })
 $env:PYTHONDONTWRITEBYTECODE = "1"
 if ($S3) {
     $env:STORAGE_BACKEND = "s3"; $env:S3_BUCKET = $Bucket; $env:S3_PREFIX = $Prefix
@@ -64,7 +67,8 @@ if ($S3) {
 
 Write-Step "Starting the API"
 Write-Host "    Storage : $where"
-Write-Host "    Admin   : $AdminUser"
-Write-Host "    Open    : http://localhost:$ApiPort/docs   (Ctrl+C here to stop)" -ForegroundColor White
+Write-Host "    Admin   : $AdminUser  (first password: $AdminPassword)"
+Write-Host "    Console : http://localhost:$ApiPort/ui/    (sign in with the admin above)" -ForegroundColor White
+Write-Host "    API docs: http://localhost:$ApiPort/docs   (Ctrl+C here to stop)" -ForegroundColor White
 Set-Location $ProjectDir
 & $py -m uvicorn app.main:create_app --factory --host 127.0.0.1 --port $ApiPort

@@ -16,21 +16,48 @@ By default the API stores its state in local JSON files under `local-test\.store
 S3 instead, run `2-start-api-s3.cmd`. It uses your `fenix-prod` profile and
 `s3://fenix-ecr-logs/cron-migration/`.
 
-Then open **http://localhost:8080/docs** in your browser. That page lets you call every
-endpoint: click an endpoint, then **Try it out**, then **Execute**.
+Then open **http://localhost:8080/ui/** and sign in as
+`latish.madapada@fenixcommerce.com` with the password `Local-Test-Admin-2026`. Section 1a
+below is a 10-minute tour of the web console. Sections 2 and 3 test the same things through
+the raw API at **http://localhost:8080/docs** (click an endpoint, **Try it out**, **Execute**).
 
-**Tell the API who you are.** Click **Authorize** (top right), type `latish` and click
-**Authorize**. `latish` is the bootstrap admin. To act as another user later, click
-**Authorize**, then **Logout**, and type the other name.
+## 1a. Tour of the web console
 
-## 2. Admin setup (as `latish`)
+`docs/USER_GUIDE.md` explains every screen in more detail, with screenshots.
+
+| # | Where | Do | Expect |
+| --- | --- | --- | --- |
+| 1 | **Allowlist** | Unlock *Cluster settings*, add `indices.recovery.*`; unlock *Index mappings*, add `products-*`; unlock *Index delete*, add `products-demo`; unlock *ILM policies* and *Ingest pipelines*, add `demo-*` to each; **Save allowlist** | "Global allowlist saved" |
+| 2 | **Cluster settings** | In the editor type `{"indices.recovery.max_bytes_per_sec": "80mb"}`, click **Dry run** | Green "Dry run passed", a diff row *Added … default → 80mb*. Nothing changed yet |
+| 3 | same | Enter a reason, **Apply change** | The setting appears on the left; "Snapshot saved" badge |
+| 4 | same | **Roll back**, enter a reason, **Roll back** | The setting is gone. Roll back again: it's back (rollback swaps) |
+| 5 | same | Dry run `{"cluster.routing.allocation.enable": "none"}` | Red "Not on the allowlist" |
+| 6 | **Indices** → `products-demo` → **Mapping** | Dry run `{"properties": {"brand": {"type": "keyword"}}}`, reason, tick "I understand", **Add fields permanently** | `brand` is listed under Current fields |
+| 7 | **ILM policies** → `demo-logs-policy` | Change `7d` to `3d`, Dry run, apply, then **View snapshot** and **Roll back** | Diff shows 7d → 3d; rollback restores 7d |
+| 8 | **Ingest pipelines** → `demo-pipeline` | Dry run with the sample document box | "Result for each sample document" shows the processed doc |
+| 9 | **Users** | **Add users**: `alice@example.com`, access *Edit* → **Create**, **Download CSV** | A CSV with `username,password` |
+| 10 | Sign out, sign in as alice | Open **Cluster settings** | She can edit; there is no Administration menu |
+| 11 | As alice: **Change password** (bottom left) | Set a new password | "Password changed" |
+| 12 | Sign in as the admin: **Audit log** | Expand a *Rejected* row | Error code, message, blocked keys, request id |
+| 13 | **Indices** → `products-demo` → **Delete** | Type the name and a reason | The index is gone; see it under "Deleted through the API" |
+
+**Sign in.** In /docs, open `POST /api/v1/auth/login`, click **Try it out**, send
+`{"username": "latish.madapada@fenixcommerce.com", "password": "Local-Test-Admin-2026"}`
+and copy the `token` from the response. Click **Authorize** (top right), paste the token and
+click **Authorize**. To act as another user, sign in as them the same way and paste their token.
+
+**Creating users** (steps 2.3 and 2.4) returns each user's generated password once in the
+response (add `?format=csv` to download it as a CSV instead). Write the passwords down: you
+sign in as alice and bob with them in step 3.
+
+## 2. Admin setup (signed in as the admin)
 
 | # | Endpoint | Body | Expect |
 | --- | --- | --- | --- |
 | 2.1 | `GET /api/v1/admin/clusters` | — | `local`, `"reachable": true`, version `8.17.1` |
 | 2.2 | `PUT /api/v1/admin/allowlist` | the allowlist below | 200 |
-| 2.3 | `PUT /api/v1/admin/users/{username}` with `alice` | `{"clusters": {"local": "edit"}}` | 200 |
-| 2.4 | `PUT /api/v1/admin/users/{username}` with `bob` | `{"clusters": {"local": "view"}}` | 200 |
+| 2.3 | `POST /api/v1/admin/users` | `{"username": "alice@example.com", "clusters": {"local": "edit"}}` | 201, `credentials.password` |
+| 2.4 | `POST /api/v1/admin/users` | `{"username": "bob@example.com", "clusters": {"local": "view"}}` | 201, `credentials.password` |
 
 The allowlist for 2.2:
 
@@ -50,7 +77,7 @@ The allowlist for 2.2:
 
 ## 3. Try it out
 
-Switch to **alice** (Authorize, Logout, then `alice`). Use `local` as `cluster_id` everywhere.
+Switch to **alice**: sign in as `alice@example.com` with her password from 2.3, then Authorize with the new token. Use `local` as `cluster_id` everywhere.
 
 ### Cluster settings: update, rollback, swap
 
@@ -118,7 +145,7 @@ This returns `security_exception`, which is how the lockdown is meant to work.
 | 3.26 | **bob** | `GET …/cluster-settings` | 200 (bob has view) |
 | 3.27 | **bob** | `PUT …/cluster-settings` with any change | 403 `PERMISSION_DENIED` |
 | 3.28 | **bob** | `GET /api/v1/admin/users` | 403 `ADMIN_REQUIRED` |
-| 3.29 | **latish** | `GET /api/v1/admin/audit` with today's **UTC** date, e.g. `2026-09-28` | every action above, with user, reason, diff and outcome, rejected attempts included |
+| 3.29 | **admin** | `GET /api/v1/admin/audit` with today's **UTC** date, e.g. `2026-09-28` | every action above, with user, reason, diff and outcome, rejected attempts included |
 
 To see what the API stored, open `local-test\.store` in File Explorer. It holds
 `snapshots\`, `state\` and `audit\` as readable JSON, the same layout the API uses in S3.
@@ -132,11 +159,11 @@ With Elasticsearch running (step 1), from the `es-config-api` folder:
 .venv\Scripts\python -m pytest -q
 ```
 
-This runs 31 tests against your local Elasticsearch, with S3 simulated. With the API
+This runs 50 tests against your local Elasticsearch, with S3 simulated. With the API
 running (step 2), you can also run:
 
 ```cmd
-.venv\Scripts\python scripts\smoke_test.py --admin latish --cluster local --es-url http://127.0.0.1:9200 --es-password changeme123
+.venv\Scripts\python scripts\smoke_test.py --admin latish.madapada@fenixcommerce.com --admin-password Local-Test-Admin-2026 --cluster local --es-url http://127.0.0.1:9200 --es-password changeme123
 ```
 
 The smoke test replaces the allowlist, so repeat step 2.2 afterwards if you want to keep
@@ -157,6 +184,6 @@ testing by hand.
 | Step 1 is stuck on "Downloading" | Corporate proxy or DLP software may block it. Download `elasticsearch-8.17.1-windows-x86_64.zip` in a browser and save it to `%USERPROFILE%\es-local\` |
 | "Elasticsearch did not start" | Check the minimized Elasticsearch window or `%USERPROFILE%\es-local\logs`. Another program may be using port 9200 |
 | `pip install failed` | Behind a proxy: `set HTTPS_PROXY=http://proxy:port` before step 2 |
-| 401 `MISSING_USER` in /docs | Click **Authorize** and enter a username |
-| 403 `UNKNOWN_USER` | That user doesn't exist yet; create it as `latish` (step 2.3) |
+| 401 `NOT_AUTHENTICATED` / `SESSION_EXPIRED` in /docs | Sign in again and paste the new token into **Authorize** |
+| 423 `ACCOUNT_LOCKED` | Five wrong passwords: wait 15 minutes or have an admin reset the password |
 | Every change returns 403 `NOT_ALLOWLISTED` | Set the allowlist (step 2.2). A new install blocks everything |

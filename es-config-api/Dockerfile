@@ -1,3 +1,12 @@
+# ---- 1) build the web console (ui/ -> app/static/ui)
+FROM node:20-alpine AS ui
+WORKDIR /src/ui
+COPY ui/package.json ui/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY ui/ ./
+RUN mkdir -p /src/app/static && npm run build
+
+# ---- 2) the API
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
@@ -7,6 +16,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
+COPY --from=ui /src/app/static/ui ./app/static/ui
 RUN useradd --system --uid 10001 api && mkdir -p /app/config && chown -R api /app
 USER api
 

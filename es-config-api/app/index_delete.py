@@ -95,10 +95,11 @@ class IndexDeleteService:
             require_cluster(user, cluster_id, "delete")
             blocked, source = self.allowlist.blocked(cluster_id, CONFIG_TYPE, [index])
             if blocked:
+                hint = (" (dot/system indices need a pattern that starts with '.')"
+                        if index.startswith(".") else "")
                 raise forbidden("NOT_ALLOWLISTED",
-                                f"Index '{index}' is not on the {source} allowlist for index-delete "
-                                "(dot/system indices need a pattern that starts with '.')",
-                                {"blocked": blocked, "allowlist": source})
+                                f"Index '{index}' is not on the {source} allowlist for "
+                                f"index-delete{hint}", {"blocked": blocked, "allowlist": source})
             if not dry_run:
                 if not (reason and reason.strip()):
                     raise bad_request("REASON_REQUIRED", "Give a 'reason' for the delete (it is audited)")
@@ -129,7 +130,8 @@ class IndexDeleteService:
             if info["aliases"]:
                 warnings.append(f"Aliases that point to this index will lose it: {info['aliases']}")
             if info["docsCount"]:
-                warnings.append(f"{info['docsCount']:,} documents will be deleted")
+                n = info["docsCount"]
+                warnings.append(f"{n:,} document{'' if n == 1 else 's'} will be deleted")
             health = es_call(es, "GET", "/_cluster/health").get("status")
 
             result = {

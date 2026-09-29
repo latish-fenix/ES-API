@@ -12,7 +12,8 @@ $SvcUser     = "config_api"
 $SvcPassword = "svc-pass-123"       # local test only
 $ProjectDir  = Split-Path -Parent $PSScriptRoot
 $ApiPort     = 8080
-$AdminUser   = "latish"
+$AdminUser   = "latish.madapada@fenixcommerce.com"
+$AdminPassword = "Local-Test-Admin-2026"   # local test only; change it at first sign-in
 
 function Write-Step($msg) { Write-Host "`n==> $msg" -ForegroundColor Cyan }
 function Write-Ok($msg)   { Write-Host "    OK  $msg" -ForegroundColor Green }

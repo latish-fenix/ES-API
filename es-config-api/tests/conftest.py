@@ -106,7 +106,7 @@ clusters:
     with mock_aws():
         s3 = boto3.client("s3", region_name="us-east-1")
         s3.create_bucket(Bucket=BUCKET)
-        settings = Settings(storage_backend="s3", s3_bucket=BUCKET, s3_prefix="t/",
+        settings = Settings(storage_backend="s3", s3_bucket=BUCKET, s3_prefix="t/", auth_mode="header",
                             clusters_file=str(clusters_file), bootstrap_admins=["root"],
                             lock_ttl_seconds=60)
         store = S3Store(BUCKET, "t/", client=s3)

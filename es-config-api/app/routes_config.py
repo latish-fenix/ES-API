@@ -60,6 +60,18 @@ def _etag(response: Response, body: dict) -> dict:
     return body
 
 
+# ------------------------------------------------------------------ identity
+@router.get("/me", summary="Who am I: username, admin flag, per-cluster access")
+def me(request: Request, user: User = Depends(current_user)):
+    registry = request.app.state.registry
+    rec = request.app.state.users.get(user.username) or {}
+    return {"username": user.username, "admin": user.admin,
+            "authMode": request.app.state.settings.auth_mode,
+            "usingGeneratedPassword": rec.get("usingGeneratedPassword", False),
+            "lastLoginAt": rec.get("lastLoginAt"),
+            "clusters": {c.id: user.level(c.id) for c in registry.all() if user.level(c.id)}}
+
+
 # ------------------------------------------------------------------ clusters
 @router.get("/clusters", summary="Clusters you can see")
 def list_clusters(request: Request, user: User = Depends(current_user)):

@@ -24,8 +24,15 @@ class Settings:
     clusters_file: str = "/app/config/clusters.yaml"
 
     # Identity / permissions
-    user_header: str = "X-User"
+    auth_mode: str = "password"               # "password" (production) | "header" (dev/tests only)
+    user_header: str = "X-User"               # header mode only
     bootstrap_admins: list[str] = field(default_factory=list)
+    bootstrap_admin_password: str | None = None
+    session_secret: str = ""
+    session_hours: float = 12.0
+    cookie_secure: bool = False               # set true once the API is served over HTTPS
+    lockout_attempts: int = 5
+    lockout_minutes: int = 15
 
     # Behaviour
     lock_ttl_seconds: int = 600
@@ -46,8 +53,15 @@ class Settings:
             s3_sse=env("S3_SSE") or None,
             local_store_dir=env("LOCAL_STORE_DIR", "./.local-store"),
             clusters_file=env("CLUSTERS_FILE", "/app/config/clusters.yaml"),
+            auth_mode=env("AUTH_MODE", "password").lower(),
             user_header=env("USER_HEADER", "X-User"),
-            bootstrap_admins=_csv(env("BOOTSTRAP_ADMINS")),
+            bootstrap_admins=[a.lower() for a in _csv(env("BOOTSTRAP_ADMINS"))],
+            bootstrap_admin_password=env("BOOTSTRAP_ADMIN_PASSWORD") or None,
+            session_secret=env("SESSION_SECRET", ""),
+            session_hours=float(env("SESSION_HOURS", "12")),
+            cookie_secure=env("COOKIE_SECURE", "false").lower() in ("1", "true", "yes"),
+            lockout_attempts=int(env("LOCKOUT_ATTEMPTS", "5")),
+            lockout_minutes=int(env("LOCKOUT_MINUTES", "15")),
             lock_ttl_seconds=int(env("LOCK_TTL_SECONDS", "600")),
             audit_query_limit=int(env("AUDIT_QUERY_LIMIT", "500")),
         )
@@ -57,3 +71,8 @@ class Settings:
             raise ValueError("STORAGE_BACKEND must be 's3' or 'local'")
         if self.storage_backend == "s3" and not self.s3_bucket:
             raise ValueError("S3_BUCKET is required when STORAGE_BACKEND=s3")
+        if self.auth_mode not in ("password", "header"):
+            raise ValueError("AUTH_MODE must be 'password' or 'header'")
+        if self.auth_mode == "password" and len(self.session_secret) < 32:
+            raise ValueError("SESSION_SECRET must be set to a random string of 32+ characters "
+                             "(e.g. `openssl rand -hex 32`)")

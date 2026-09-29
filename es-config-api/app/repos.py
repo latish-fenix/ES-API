@@ -41,6 +41,7 @@ def _update_with_retry(store: ObjectStore, key: str, mutate, default: dict, atte
 # --------------------------------------------------------------------------- users
 class UsersRepo:
     KEY = "state/users.json"
+    SECRET_FIELDS = ("passwordHash",)
 
     def __init__(self, store: ObjectStore, bootstrap_admins: list[str]):
         self.store = store
@@ -50,13 +51,7 @@ class UsersRepo:
         data, _ = self.store.get_json(self.KEY)
         return (data or {}).get("users", {})
 
-    def list(self) -> list[dict]:
-        users = self._all()
-        names = sorted(set(users) | self.bootstrap_admins)
-        return [self.get(n) for n in names]
-
-    def get(self, username: str) -> dict | None:
-        rec = self._all().get(username)
+    def _full(self, username: str, rec: dict | None) -> dict | None:
         if rec is None and username not in self.bootstrap_admins:
             return None
         rec = dict(rec or {"admin": False, "clusters": {}})
@@ -66,17 +61,94 @@ class UsersRepo:
             rec["admin"] = True
         return rec
 
-    def put(self, username: str, admin: bool, clusters: dict[str, str], by: str) -> dict:
+    @classmethod
+    def public(cls, rec: dict | None) -> dict | None:
+        """A user record safe to return from the API: no password hash."""
+        if rec is None:
+            return None
+        out = {k: v for k, v in rec.items() if k not in cls.SECRET_FIELDS}
+        out["hasPassword"] = bool(rec.get("passwordHash"))
+        out["usingGeneratedPassword"] = bool(rec.get("passwordHash") and rec.get("passwordGenerated"))
+        return out
+
+    def list(self) -> list[dict]:
+        users = self._all()
+        names = sorted(set(users) | self.bootstrap_admins)
+        return [self.public(self._full(n, users.get(n))) for n in names]
+
+    def get(self, username: str) -> dict | None:
+        return self.public(self._full(username, self._all().get(username)))
+
+    def get_auth(self, username: str) -> dict | None:
+        """Full record, including the password hash. Never return this from the API."""
+        return self._full(username, self._all().get(username))
+
+    def exists(self, username: str) -> bool:
+        return username in self._all()
+
+    def put(self, username: str, admin: bool, clusters: dict[str, str], by: str,
+            password_hash: str | None = None, generated: bool = False) -> dict:
+        """Create or update admin flag + permissions. Password fields are kept unless
+        a new hash is given (used when creating a user)."""
         def mutate(doc):
             prev = doc["users"].get(username)
-            doc["users"][username] = {
-                "admin": bool(admin), "clusters": clusters,
-                "createdAt": (prev or {}).get("createdAt", iso()),
-                "updatedAt": iso(), "updatedBy": by,
-            }
+            rec = dict(prev or {"createdAt": iso(), "createdBy": by, "tokenVersion": 0})
+            rec.update({"admin": bool(admin), "clusters": clusters, "updatedAt": iso(),
+                        "updatedBy": by})
+            if password_hash:
+                rec.update(passwordHash=password_hash, passwordGenerated=generated,
+                           passwordSetAt=iso(), failedLogins=0, lockedUntil=None,
+                           tokenVersion=int(rec.get("tokenVersion", 0)) + 1)
+            doc["users"][username] = rec
             return prev
         prev = _update_with_retry(self.store, self.KEY, mutate, {"users": {}})
-        return {"before": prev, "after": self.get(username)}
+        return {"before": self.public(prev), "after": self.get(username)}
+
+    def set_password(self, username: str, password_hash: str, generated: bool, by: str) -> int:
+        """Set a password; bumps tokenVersion so every older session stops working."""
+        def mutate(doc):
+            rec = doc["users"].get(username)
+            if rec is None:
+                if username not in self.bootstrap_admins:
+                    raise not_found("USER_NOT_FOUND", f"Unknown user '{username}'")
+                rec = {"admin": True, "clusters": {}, "createdAt": iso(), "tokenVersion": 0}
+            version = int(rec.get("tokenVersion", 0)) + 1
+            rec.update(passwordHash=password_hash, passwordGenerated=generated,
+                       passwordSetAt=iso(), passwordSetBy=by, failedLogins=0,
+                       lockedUntil=None, tokenVersion=version)
+            doc["users"][username] = rec
+            return version
+        return _update_with_retry(self.store, self.KEY, mutate, {"users": {}})
+
+    def bump_token_version(self, username: str) -> int:
+        def mutate(doc):
+            rec = doc["users"].get(username)
+            if rec is None:
+                raise not_found("USER_NOT_FOUND", f"Unknown user '{username}'")
+            rec["tokenVersion"] = int(rec.get("tokenVersion", 0)) + 1
+            return rec["tokenVersion"]
+        return _update_with_retry(self.store, self.KEY, mutate, {"users": {}})
+
+    def record_login(self, username: str, success: bool, max_attempts: int,
+                     lock_minutes: int) -> dict:
+        """Count failures; lock after max_attempts. Returns {locked, lockedUntil, failed}."""
+        def mutate(doc):
+            rec = doc["users"].get(username)
+            if rec is None:
+                return {"locked": False, "lockedUntil": None, "failed": 0}
+            if success:
+                rec.update(failedLogins=0, lockedUntil=None, lastLoginAt=iso())
+                return {"locked": False, "lockedUntil": None, "failed": 0}
+            if rec.get("lockedUntil") and rec["lockedUntil"] < time.time():
+                rec["lockedUntil"] = None
+            failed = int(rec.get("failedLogins", 0)) + 1
+            rec["failedLogins"] = failed
+            if failed >= max_attempts:
+                rec["lockedUntil"] = time.time() + lock_minutes * 60
+                rec["failedLogins"] = 0
+            locked = bool(rec.get("lockedUntil") and rec["lockedUntil"] > time.time())
+            return {"locked": locked, "lockedUntil": rec.get("lockedUntil"), "failed": failed}
+        return _update_with_retry(self.store, self.KEY, mutate, {"users": {}})
 
     def set_permissions(self, username: str, clusters: dict[str, str], by: str) -> dict:
         def mutate(doc):
@@ -84,7 +156,7 @@ class UsersRepo:
             if rec is None:
                 if username not in self.bootstrap_admins:
                     raise not_found("USER_NOT_FOUND", f"Unknown user '{username}'")
-                rec = {"admin": True, "clusters": {}, "createdAt": iso()}
+                rec = {"admin": True, "clusters": {}, "createdAt": iso(), "tokenVersion": 0}
             before = dict(rec.get("clusters", {}))
             rec.update({"clusters": clusters, "updatedAt": iso(), "updatedBy": by})
             doc["users"][username] = rec
@@ -101,7 +173,7 @@ class UsersRepo:
             if username not in doc["users"]:
                 raise not_found("USER_NOT_FOUND", f"Unknown user '{username}'")
             return doc["users"].pop(username)
-        return _update_with_retry(self.store, self.KEY, mutate, {"users": {}})
+        return self.public(_update_with_retry(self.store, self.KEY, mutate, {"users": {}}))
 
 
 # ----------------------------------------------------------------------- allowlist

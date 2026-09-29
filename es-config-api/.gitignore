@@ -8,3 +8,5 @@ __pycache__/
 .venv/
 local-test/.store/
 local-test/clusters.local.yaml
+ui/node_modules/
+*.tsbuildinfo
