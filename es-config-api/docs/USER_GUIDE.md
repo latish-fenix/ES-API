@@ -1,6 +1,6 @@
 # ES Config Console — User Guide
 
-*Last updated 30 September 2026: optional cluster passwords, index-level access, editing documents with undo, bulk changes, node stats on the Overview, cluster settings under Administration. The same guide, kept in sync, is also a shared Claude Doc.*
+*Last updated 30 September 2026: roll back any change from the audit log, recent changes with roll back on the Data page, recreate deleted indices, optional cluster passwords, index-level access, editing documents with undo, bulk changes, node stats on the Overview, cluster settings under Administration. The same guide, kept in sync, is also a shared Claude Doc.*
 
 The ES Config Console is the web page for reading and changing Elasticsearch configuration and documents safely: every change is previewed first, the previous state is saved before it is applied, and everything is written to an audit log.
 
@@ -137,7 +137,9 @@ Click **Roll back**. The dialog shows who took the snapshot, when, and a preview
 
 ![Rollback dialog](images/05-rollback.png)
 
-There is one level of rollback, and it **swaps**: the config you replace becomes the new snapshot, so rolling back twice re-applies your change. Mappings can't be rolled back (Elasticsearch never removes fields).
+There is one level of rollback on this button, and it **swaps**: the config you replace becomes the new snapshot, so rolling back twice re-applies your change. Mappings can't be rolled back (Elasticsearch never removes fields).
+
+**Older changes:** every applied change also keeps the state from just before it, so admins can undo *any* past change, not only the latest, from the audit log (see [Roll back from the audit log](#roll-back-from-the-audit-log)).
 
 ## Cluster settings
 
@@ -210,6 +212,10 @@ The **Deleted through the API** tab lists every index deleted this way, who dele
 
 ![Deleted indices](images/11-deleted-indices.png)
 
+**Recreate** (on that tab, with Edit access on the index, or in the audit log) brings the index back **empty**, with its old settings, mappings and aliases. The dialog shows exactly what it gets; its documents can't come back, so reload them from their source afterwards.
+
+![Recreating a deleted index](images/37-recreate-index.png)
+
 ## Data: browse and edit documents
 
 **Data** in the sidebar lets you search and read the documents in an index, filter them, pick columns, open one, and export the results. With Edit access you can also change documents, one at a time or in bulk, and undo those changes (see [Edit, add or delete a document](#edit-add-or-delete-a-document)). You need at least View on the index. System indices (names starting with a dot) can't be opened, and a pattern only shows the indices you may see.
@@ -278,6 +284,16 @@ If someone else changed the same document after you opened it, saving is refused
 **Delete a document:** open it, **Delete**, type its id and a reason. A copy is kept.
 
 Documents in data streams (indices named `.ds-…`) are read-only here.
+
+### Recent changes and roll back
+
+When you open an index or pattern, **Recent changes** at the top lists the newest changes on it: document edits, adds, deletes, restores and bulk changes, with who, when and why. **Show all** lists up to 10.
+
+![Recent changes at the top of the Data page](images/35-data-recent-changes.png)
+
+**Roll back** (with Edit access on that index) opens a dry run of the rollback: what the document or documents will look like again, field by field. Give a reason and confirm; for a bulk change, also type the number of documents. The change you undo is then marked **Rolled back**, and the rollback itself appears in the list, so it can be undone too.
+
+![Rolling back a document edit](images/36-data-rollback.png)
 
 ### Undo a change to a document
 
@@ -471,10 +487,27 @@ The audit log records every change, dry run, rollback, delete, sign-in and admin
 
 ![Audit log with a rejected dry run expanded](images/18-audit-log.png)
 
-- **Filters:** date (UTC), cluster, user, action (UPDATE, ROLLBACK, DRY\_RUN, INDEX\_DELETE, DATA\_SEARCH, DATA\_EXPORT, ADMIN\_\* including ADMIN\_CLUSTER\_\*, AUTH\_\*) and outcome (Success, Rejected, Failed, No change). The filters stay in the address bar, so you can share a filtered view
+- **Filters:** date (UTC), cluster, user, action (UPDATE, ROLLBACK, RESTORE, DRY\_RUN, INDEX\_DELETE, INDEX\_RECREATE, DATA\_SEARCH, DATA\_EXPORT, ADMIN\_\* including ADMIN\_CLUSTER\_\*, AUTH\_\*) and outcome (Success, Rejected, Failed, No change). The filters stay in the address bar, so you can share a filtered view
 - **Expand a row** (click it) to see the error code and message, blocked keys, the reason given, the diff of what changed, the change and request IDs, and the source IP
 - **Export JSON** downloads what the filters show
 - The page shows up to 500 events; narrow the filters if there are more
+
+### Roll back from the audit log
+
+Every successful change has a **Roll back** button on its row:
+
+| Change | What Roll back does |
+| --- | --- |
+| Cluster settings, index settings, templates, ILM policies, ingest pipelines | Puts the config back to how it was just before that change, even if other changes came after it (they are undone too; the dry run says so and shows the diff). A change that created something deletes it again |
+| Document edit, add, delete, restore | Puts that document back as it was before the change |
+| Bulk update, delete or restore | Puts every document of that change back as it was |
+| Index delete | **Recreate**: the index comes back empty, with its settings, mappings and aliases |
+
+Mapping changes have no button: Elasticsearch can't remove fields.
+
+![Rolling back an older ILM change from the audit log](images/34-audit-rollback.png)
+
+Each rollback starts with a dry run and changes nothing until you give a reason and click **Roll back**. It is audited like any change (`RESTORE`, `DATA_DOC_RESTORE`, `DATA_BULK_RESTORE`, `INDEX_RECREATE`) and has its own Roll back button, so it can be undone too. A change already undone shows **Rolled back** instead of the button.
 
 The short request ID at the bottom of every red error box in the console is the start of the Request ID here, so a user can tell you exactly which attempt failed. Passwords are never written to the audit log.
 
@@ -496,6 +529,7 @@ A red box always means nothing was changed; its last line shows the error code a
 | Invalid JSON | A typo in the editor (red underline) | Fix the highlighted line |
 | Can't reach the cluster | The API server can't connect to Elasticsearch | Tell whoever runs the API server |
 | System and hidden indices can't be browsed | The name or pattern starts with a dot | Browse the normal index instead |
+| No saved state for that change | The change is older than change history (before this version), or not a change to that resource | Use **Roll back** on the page for its latest change |
 | Changed since you read it | Someone else edited the document after you opened it | Reload the page and make your edit again |
 | Run the dry run again | The documents a bulk change matches changed after the dry run, or it's older than 15 minutes | Click **Dry run again** and check the new count |
 | … documents match; bulk changes are limited to 10,000 | The search matches too many documents | Add a filter or time range, or split it by date |
@@ -524,10 +558,10 @@ A red box always means nothing was changed; its last line shows the error code a
 **FAQ**
 
 - **Can I undo a rollback?** Yes: roll back again. Rollback swaps the live config and the snapshot.
-- **Can I go back two changes?** No, only one level. Older snapshots are kept in S3 (bucket versioning) if an admin needs to recover one.
+- **Can I go back two changes?** The **Roll back** button on a page goes back one step. To undo an older change, an admin uses **Roll back** on that change in the audit log.
 - **Why is a Roll back button greyed out?** Nothing has been changed through the console yet, so there is no snapshot.
 - **Why can't I roll back a mapping?** Elasticsearch never removes fields from a mapping.
-- **Can I recover a deleted index's documents?** No. Only its settings, mappings and aliases are saved, so an empty copy can be recreated from **Definition**.
+- **Can I recover a deleted index's documents?** No. Only its settings, mappings and aliases are saved: **Recreate** brings the index back empty.
 - **Who can see my changes?** Admins, in the audit log, with your email, time, reason and diff.
 - **Do I need to sign out when an admin changes my access?** No, it applies to your next click.
 - **Can scripts do the same things?** Yes, through the API with a token from sign-in; see [API_REFERENCE.md](API_REFERENCE.md).

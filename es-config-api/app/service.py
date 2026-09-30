@@ -8,6 +8,7 @@ Nothing touches Elasticsearch until the snapshot is safely in S3.
 """
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -30,10 +31,11 @@ def authorize(user: User, cluster_id: str, config_type: str, resource: str, need
         require_index(user, cluster_id, resource, needed)
     else:
         require_cluster(user, cluster_id, needed)
-from .repos import AllowlistRepo, AuditRepo, LockRepo, SnapshotRepo
+from .repos import AllowlistRepo, AuditRepo, ConfigHistoryRepo, LockRepo, SnapshotRepo
 from .util import diff, diff_is_empty, iso, new_id
 
 CLUSTER_RESOURCE = "_cluster"
+log = logging.getLogger("es_config_api.service")
 
 
 @dataclass
@@ -44,9 +46,10 @@ class RequestMeta:
 
 class ChangeService:
     def __init__(self, registry: ClusterRegistry, snapshots: SnapshotRepo, locks: LockRepo,
-                 allowlist: AllowlistRepo, audit: AuditRepo):
+                 allowlist: AllowlistRepo, audit: AuditRepo, history: ConfigHistoryRepo | None = None):
         self.registry = registry
         self.snapshots = snapshots
+        self.history = history or ConfigHistoryRepo(snapshots.store)
         self.locks = locks
         self.allowlist = allowlist
         self.audit = audit
@@ -133,17 +136,38 @@ class ChangeService:
                             config=None, reason=reason, sample_docs=None,
                             dry_run=dry_run, force=force, if_match=if_match)
 
+    def restore(self, user: User, meta: RequestMeta, cluster_id: str, config_type: str,
+                resource: str, restore_of: str, reason: str | None, dry_run: bool, force: bool,
+                if_match: str | None) -> dict:
+        """Put a resource back to the state it had just before change `restore_of` (any past
+        change, from the audit log). Later changes to it are undone too; the diff shows them."""
+        return self._change("RESTORE", user, meta, cluster_id, config_type, resource,
+                            config=None, reason=reason, sample_docs=None, dry_run=dry_run,
+                            force=force, if_match=if_match, restore_of=restore_of)
+
+    def change_history(self, user: User, cluster_id: str, config_type: str, resource: str) -> dict:
+        authorize(user, cluster_id, config_type, resource, "view")
+        handler = get_handler(config_type)
+        handler.check_resource(resource)
+        items = [{k: e.get(k) for k in ("changeId", "action", "at", "by", "reason", "beforeVersion",
+                                          "afterVersion", "restoreOf")}
+                 | {"createdResource": not (e.get("before") or {}).get("exists"),
+                    "restorable": handler.rollback_supported}
+                 for e in self.history.list(cluster_id, config_type, resource)]
+        return {"clusterId": cluster_id, "configType": config_type, "resource": resource, "items": items}
+
     # --------------------------------------------------------------- internals
     def _change(self, action: str, user: User, meta: RequestMeta, cluster_id: str,
                 config_type: str, resource: str, *, config: Any, reason: str | None,
                 sample_docs: list | None, dry_run: bool, force: bool,
-                if_match: str | None) -> dict:
+                if_match: str | None, restore_of: str | None = None) -> dict:
         change_id = new_id()
         audit_base = {
             "changeId": change_id, "action": "DRY_RUN" if dry_run else action,
             "requestedAction": action, "actor": user.username, "sourceIp": meta.source_ip,
             "requestId": meta.request_id, "clusterId": cluster_id, "configType": config_type,
             "resource": resource, "reason": reason, "forced": force,
+            **({"restoreOf": restore_of} if restore_of else {}),
         }
         token = None
         ctx: dict[str, Any] = {}
@@ -154,7 +178,7 @@ class ChangeService:
             authorize(user, cluster_id, config_type, resource, "edit")
             if not dry_run and not (reason and reason.strip()):
                 raise bad_request("REASON_REQUIRED", "Give a 'reason' for the change (it is audited)")
-            if action == "ROLLBACK" and not handler.rollback_supported:
+            if action in ("ROLLBACK", "RESTORE") and not handler.rollback_supported:
                 raise unprocessable("ROLLBACK_NOT_SUPPORTED",
                                     f"{handler.label} changes are permanent and cannot be rolled back")
             es = self.registry.client(cluster_id)
@@ -201,6 +225,25 @@ class ChangeService:
                 if current.exists is False and handler.resource_kind == "index":
                     raise not_found("INDEX_NOT_FOUND", f"Index '{resource}' does not exist")
                 plan = handler.plan_update(es, resource, current, config)
+            elif action == "RESTORE":
+                if current.exists is False and handler.resource_kind == "index":
+                    raise not_found("INDEX_NOT_FOUND", f"Index '{resource}' does not exist any more")
+                entry = self.history.get(cluster_id, config_type, resource, restore_of or "")
+                prev = (doc or {}).get("previous")
+                if entry:
+                    before = entry["before"]
+                    if entry.get("afterVersion") and entry["afterVersion"] != version_before:
+                        warnings.append("This resource changed again after that change (later changes "
+                                        "or edits outside the API). Restoring the state from before "
+                                        "it undoes those too: check the diff")
+                elif prev and prev.get("changeId") == restore_of:
+                    before = prev["state"]   # made before change history was kept: the snapshot has it
+                else:
+                    raise not_found("CHANGE_NOT_FOUND",
+                                    "No saved state for that change (it may be older than change "
+                                    "history, or not a change to this resource)")
+                ctx["restoreOf"] = restore_of
+                plan = Plan(target=State.from_dict(before))
             else:
                 prev = (doc or {}).get("previous")
                 if not prev:
@@ -303,6 +346,17 @@ class ChangeService:
             }
             self.snapshots.put(cluster_id, config_type, resource, final, etag)
             snap_key = SnapshotRepo.key(cluster_id, config_type, resource)
+            # -- 5) change history: the state before this change, so it can be undone later
+            try:
+                self.history.put({
+                    "changeId": change_id, "action": action, "clusterId": cluster_id,
+                    "configType": config_type, "resource": resource, "by": user.username,
+                    "at": pending["at"], "reason": reason, "before": current.to_dict(),
+                    "beforeVersion": version_before, "afterVersion": after.version,
+                    **({"restoreOf": restore_of} if restore_of else {})})
+                ctx["restorable"] = handler.rollback_supported
+            except Exception:  # the change is applied; a missing history entry must not fail it
+                log.exception("Could not save change history for %s %s %s", cluster_id, config_type, resource)
             if apply_error:
                 result["warnings"] = result["warnings"] + [
                     f"Elasticsearch returned an error ({apply_error.message}) but the config did "

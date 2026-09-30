@@ -29,7 +29,7 @@ class ObjectStore(Protocol):
     def put_json(self, key: str, data: dict, *, if_match: str | None = None,
                  if_none_match: bool = False) -> str: ...
     def delete(self, key: str) -> None: ...
-    def list_keys(self, prefix: str) -> list[str]: ...
+    def list_keys(self, prefix: str, limit: int | None = None) -> list[str]: ...
 
 
 def _encode(data: dict) -> bytes:
@@ -83,13 +83,17 @@ class S3Store:
     def delete(self, key: str) -> None:
         self.s3.delete_object(Bucket=self.bucket, Key=self._k(key))
 
-    def list_keys(self, prefix: str) -> list[str]:
+    def list_keys(self, prefix: str, limit: int | None = None) -> list[str]:
+        """Keys under prefix in key order; with limit, only the first `limit` (S3 lists in
+        key order, so this reads no more than needed)."""
         keys: list[str] = []
         paginator = self.s3.get_paginator("list_objects_v2")
-        for page in paginator.paginate(Bucket=self.bucket, Prefix=self._k(prefix)):
+        extra = {"PaginationConfig": {"MaxItems": limit}} if limit else {}
+        for page in paginator.paginate(Bucket=self.bucket, Prefix=self._k(prefix), **extra):
             for item in page.get("Contents", []):
                 keys.append(item["Key"][len(self.prefix):])
-        return sorted(keys)
+        keys.sort()
+        return keys[:limit] if limit else keys
 
 
 class LocalStore:
@@ -139,13 +143,14 @@ class LocalStore:
         if path.exists():
             path.unlink()
 
-    def list_keys(self, prefix: str) -> list[str]:
+    def list_keys(self, prefix: str, limit: int | None = None) -> list[str]:
         base = self.root
-        return sorted(
+        keys = sorted(
             str(p.relative_to(base)).replace(os.sep, "/")
             for p in base.rglob("*") if p.is_file() and not p.name.endswith(".tmp")
             and str(p.relative_to(base)).replace(os.sep, "/").startswith(prefix)
         )
+        return keys[:limit] if limit else keys
 
 
 def build_store(settings: Settings) -> ObjectStore:

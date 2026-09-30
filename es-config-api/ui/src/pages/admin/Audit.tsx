@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { Fragment, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
+import { RollbackDialog, rollbackTargetFromAudit, type RollbackTarget } from "../Rollback";
 import { get, type AuditEvent } from "../../api";
 import { DiffTable } from "../../components/DiffTable";
 import { Icon } from "../../components/icons";
@@ -9,13 +10,15 @@ import { Badge, Empty, ErrorCallout, Loading, downloadFile } from "../../compone
 import { CONFIG_TYPE_LABEL, pretty, todayUtc, when } from "../../format";
 import { useClusters } from "../../session";
 
-const ACTIONS = ["UPDATE", "ROLLBACK", "DRY_RUN", "INDEX_DELETE", "DATA_SEARCH", "DATA_EXPORT", "DATA_*", "ADMIN_*", "ADMIN_CLUSTER_*", "AUTH_*"];
+const ACTIONS = ["UPDATE", "ROLLBACK", "RESTORE", "DRY_RUN", "INDEX_DELETE", "INDEX_RECREATE", "DATA_SEARCH", "DATA_EXPORT", "DATA_*", "ADMIN_*", "ADMIN_CLUSTER_*", "AUTH_*"];
 const OUTCOMES = ["SUCCESS", "REJECTED", "FAILED", "NO_CHANGE"];
 
 const HUMAN: Record<string, string> = {
   UPDATE: "Update",
   ROLLBACK: "Rollback",
+  RESTORE: "Restore",
   INDEX_DELETE: "Index delete",
+  INDEX_RECREATE: "Index recreated",
   AUTH_LOGIN: "Sign in",
   AUTH_LOGOUT: "Sign out",
   AUTH_LOGOUT_ALL: "Sign out everywhere",
@@ -38,7 +41,7 @@ const HUMAN: Record<string, string> = {
 export function actionLabel(e: AuditEvent): string {
   const type = e.configType ? CONFIG_TYPE_LABEL[e.configType]?.toLowerCase() ?? e.configType : "";
   if (e.action === "DRY_RUN") return `Dry run · ${e.requestedAction === "ROLLBACK" ? "rollback · " : ""}${type}`;
-  if (e.action === "UPDATE" || e.action === "ROLLBACK") return `${HUMAN[e.action]} · ${type}`;
+  if (e.action === "UPDATE" || e.action === "ROLLBACK" || e.action === "RESTORE") return `${HUMAN[e.action]} · ${type}`;
   return HUMAN[e.action] ?? e.action;
 }
 
@@ -98,6 +101,7 @@ export function Audit() {
   const outcome = params.get("outcome") ?? "";
   const [userDraft, setUserDraft] = useState(user);
   const [open, setOpen] = useState<string | null>(null);
+  const [rollback, setRollback] = useState<RollbackTarget | null>(null);
   const exactAction = action && !action.endsWith("*") ? action : undefined;
 
   const set = (k: string, v: string) => {
@@ -112,13 +116,16 @@ export function Audit() {
   });
   const items = useMemo(() => (q.data?.items ?? []).filter((e) =>
     (!action || !action.endsWith("*") || e.action.startsWith(action.slice(0, -1))) && (!outcome || e.outcome === outcome)), [q.data, action, outcome]);
+  // changes already rolled back (a later successful restore points at them), on this day's log
+  const undone = useMemo(() => new Set((q.data?.items ?? []).filter((e) => e.outcome === "SUCCESS" && e.action !== "DRY_RUN" && typeof e.restoreOf === "string")
+    .map((e) => e.restoreOf as string)), [q.data]);
 
   return (
     <Page crumbs={[{ label: "Administration" }, { label: "Audit log" }]} title="Audit log">
       <div className="page-head" style={{ alignItems: "center" }}>
         <div className="grow">
           <h1>Audit log</h1>
-          <span className="sub">Every change, dry run, sign-in and rejected attempt, newest first. Times in UTC.</span>
+          <span className="sub">Every change, dry run, sign-in and rejected attempt, newest first. Times in UTC. <strong>Roll back</strong> undoes a change (config, documents, bulk changes) after a dry run; <strong>Recreate</strong> brings a deleted index back empty.</span>
         </div>
         <button type="button" className="btn" disabled={!items.length} onClick={() => downloadFile(`audit-${date}${clusterId ? `-${clusterId}` : ""}.json`, pretty(items), "application/json")}>
           <Icon name="download" /> Export JSON
@@ -154,10 +161,11 @@ export function Audit() {
         ) : (
           <div className="table-scroll" style={{ maxHeight: "calc(100vh - 360px)" }}>
             <table className="table">
-              <thead><tr><th style={{ width: 28 }} /><th>Time</th><th>User</th><th>Action</th><th>Type</th><th>Target</th><th>Outcome</th></tr></thead>
+              <thead><tr><th style={{ width: 28 }} /><th>Time</th><th>User</th><th>Action</th><th>Type</th><th>Target</th><th>Outcome</th><th style={{ width: 120 }}><span className="sr-only">Roll back</span></th></tr></thead>
               <tbody>
                 {items.map((e) => {
                   const isOpen = open === e.eventId;
+                  const rb = rollbackTargetFromAudit(e);
                   return (
                     <Fragment key={e.eventId}>
                       <tr className={`clickable ${isOpen ? "selected" : ""}`} onClick={() => setOpen(isOpen ? null : e.eventId)}>
@@ -173,9 +181,17 @@ export function Audit() {
                         <td>{e.configType ?? (e.action.startsWith("ADMIN_ALLOWLIST") ? "allowlist" : e.action.startsWith("ADMIN_CLUSTER") ? "clusters" : e.action.startsWith("ADMIN_") ? "users" : e.action.startsWith("AUTH_") ? "auth" : "—")}</td>
                         <td className="cell-mono">{target(e)}</td>
                         <td><AuditOutcome outcome={e.outcome} /></td>
+                        <td style={{ textAlign: "right" }}>
+                          {rb && undone.has(e.changeId as string) ? <Badge title="A later change in this log rolled it back">Rolled back</Badge> : rb && (
+                            <button type="button" className="btn btn-ghost btn-sm" title={`Undo ${rb.label}`}
+                              onClick={(ev) => { ev.stopPropagation(); setRollback(rb); }}>
+                              <Icon name="undo" size={14} /> {rb.kind === "index" ? "Recreate" : "Roll back"}
+                            </button>
+                          )}
+                        </td>
                       </tr>
                       {isOpen && (
-                        <tr className="selected"><td /><td colSpan={6}><Details e={e} /></td></tr>
+                        <tr className="selected"><td /><td colSpan={7}><Details e={e} /></td></tr>
                       )}
                     </Fragment>
                   );
@@ -185,6 +201,7 @@ export function Audit() {
           </div>
         )}
       </section>
+      {rollback && <RollbackDialog target={rollback} onClose={() => setRollback(null)} />}
       {q.data && q.data.count >= 500 && <span className="hint">Showing the newest {q.data.count} events (the server limit). Narrow the filters to see the rest.</span>}
     </Page>
   );

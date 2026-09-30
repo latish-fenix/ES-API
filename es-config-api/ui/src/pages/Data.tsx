@@ -10,6 +10,7 @@ import { Page, useClusterCrumbs } from "../components/Shell";
 import { Badge, Callout, Dialog, Empty, ErrorCallout, Loading, Spinner, copyText, useToast } from "../components/ui";
 import { num } from "../format";
 import { BulkDialog, ChangesDialog, DeleteDoc, DocHistory, EditDoc, NewDocDialog } from "./DataEdit";
+import { RecentChanges } from "./Rollback";
 import { useCluster, useHealth } from "../session";
 
 // ------------------------------------------------------------------ helpers
@@ -329,6 +330,8 @@ export function Data() {
       ) : fields.error ? (
         <section className="card"><div className="card-body"><ErrorCallout error={fields.error} clusterId={clusterId} admin={admin} /></div></section>
       ) : (
+        <>
+        <RecentChanges clusterId={clusterId} index={index} />
         <section className="card" style={{ overflow: "hidden" }}>
           <div className="data-toolbar">
             <div className="row" style={{ gap: 10, minWidth: 0 }}>
@@ -425,6 +428,7 @@ export function Data() {
             </div>
           ) : null}
         </section>
+        </>
       )}
 
       {filterEdit && (

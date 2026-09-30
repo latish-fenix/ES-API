@@ -17,7 +17,7 @@ from __future__ import annotations
 from typing import Any
 
 from .clusters import es_call
-from .errors import ApiError, bad_request, forbidden, not_found, unprocessable
+from .errors import ApiError, bad_request, conflict, forbidden, not_found, unprocessable
 from .handlers.base import Handler
 from .identity import User, require_any_access, require_index
 from .util import iso, new_id
@@ -68,6 +68,41 @@ def _index_summary(es, index: str) -> dict:
         "dataStream": entry.get("data_stream"),
         "definition": definition,  # settings + mappings + aliases, for the tombstone
     }
+
+
+# Settings Elasticsearch sets itself (or that only make sense for the old index): left out
+# when an index is recreated from its saved definition.
+_NOT_RECREATED = {"uuid", "creation_date", "creation_date_string", "version", "provided_name",
+                  "history", "resize", "shrink", "verified_before_close", "store.snapshot",
+                  "frozen", "blocks", "routing.allocation.initial_recovery", "lifecycle.indexing_complete",
+                  "lifecycle.rollover_alias.recovery"}
+
+
+def _flat(d: dict, prefix: str = "") -> dict:
+    out = {}
+    for k, v in (d or {}).items():
+        key = f"{prefix}{k}"
+        if isinstance(v, dict) and k not in ("analysis", "sort", "similarity"):
+            out.update(_flat(v, key + "."))
+        else:
+            out[key] = v
+    return out
+
+
+def recreate_body(definition: dict) -> dict:
+    """Create-index body from a GET /<index> definition: its settings (minus the ones ES
+    manages), mappings and aliases."""
+    settings = _flat((definition.get("settings") or {}).get("index") or {})
+    keep = {k: v for k, v in settings.items()
+            if not any(k == x or k.startswith(x + ".") for x in _NOT_RECREATED)}
+    body: dict[str, Any] = {"settings": {"index": keep}}
+    if definition.get("mappings"):
+        body["mappings"] = definition["mappings"]
+    if definition.get("aliases"):
+        body["aliases"] = definition["aliases"]
+    return body
+
+
 
 
 class IndexDeleteService:
@@ -191,5 +226,62 @@ class IndexDeleteService:
                               "deletedBy": doc["deletedBy"], "reason": doc.get("reason"),
                               "docsCount": doc["summary"].get("docsCount"),
                               "storeSizeBytes": doc["summary"].get("storeSizeBytes"),
-                              "key": key, "definition": doc["definition"]})
+                              "key": key, "definition": doc["definition"],
+                              "recreatedAt": doc.get("recreatedAt"), "recreatedBy": doc.get("recreatedBy")})
         return {"clusterId": cluster_id, "items": items}
+
+    def recreate(self, user: User, meta, cluster_id: str, key: str,
+                 reason: str | None, dry_run: bool) -> dict:
+        """Recreate a deleted index, empty, from its tombstone. Needs `edit` on that index name."""
+        change_id = new_id()
+        audit_base = {"changeId": change_id, "action": "DRY_RUN" if dry_run else "INDEX_RECREATE",
+                      "requestedAction": "INDEX_RECREATE", "actor": user.username,
+                      "sourceIp": meta.source_ip, "requestId": meta.request_id, "clusterId": cluster_id,
+                      "configType": CONFIG_TYPE, "reason": reason, "tombstoneKey": key}
+        try:
+            self.registry.get(cluster_id)
+            if not key.startswith(f"deleted-indices/{cluster_id}/") or ".." in key:
+                raise bad_request("INVALID_KEY", "That key is not a deleted index of this cluster")
+            tomb, etag = self.store.get_json(key)
+            if not tomb:
+                raise not_found("TOMBSTONE_NOT_FOUND", "No saved definition under that key")
+            index = tomb["index"]
+            audit_base.update(resource=index, restoreOf=tomb.get("changeId"))
+            require_index(user, cluster_id, index, "edit")
+            es = self.registry.client(cluster_id)
+            try:
+                exists = es_call(es, "GET", f"/_resolve/index/{index}", params={"expand_wildcards": "all"})
+            except ApiError as e:
+                if e.code != "ES_NOT_FOUND":
+                    raise
+                exists = {}
+            if any(x.get("name") == index for part in ("indices", "aliases", "data_streams")
+                   for x in exists.get(part, [])):
+                raise conflict("INDEX_EXISTS", f"'{index}' exists again; delete it first or keep it")
+            body = recreate_body(tomb.get("definition") or {})
+            warnings = ["The index is recreated EMPTY: its documents were deleted and can't come back. "
+                        "Reindex or reload the data from its source"]
+            for alias, spec in (body.get("aliases") or {}).items():
+                if (spec or {}).get("is_write_index"):
+                    warnings.append(f"Alias '{alias}' is set as this index's write alias again; "
+                                    "if another index took over writing, remove it from this one")
+            out = {"index": index, "dryRun": dry_run, "body": body, "warnings": warnings,
+                   "deletedAt": tomb.get("deletedAt"), "deletedBy": tomb.get("deletedBy"),
+                   "docsLost": (tomb.get("summary") or {}).get("docsCount")}
+            if dry_run:
+                self.audit.write({**audit_base, "outcome": "SUCCESS"})
+                return out
+            if not (reason and reason.strip()):
+                raise bad_request("REASON_REQUIRED", "Give a 'reason' (it is audited)")
+            es_call(es, "PUT", f"/{index}", body=body)
+            tomb.update(recreatedAt=iso(), recreatedBy=user.username, recreateChangeId=change_id)
+            try:
+                self.store.put_json(key, tomb)
+            except Exception:
+                pass
+            self.audit.write({**audit_base, "outcome": "SUCCESS"})
+            return {**out, "applied": True, "changeId": change_id}
+        except ApiError as e:
+            self.audit.write({**audit_base, "outcome": "REJECTED" if e.status < 500 and e.code != "ES_REJECTED" else "FAILED",
+                              "error": {"status": e.status, "code": e.code, "message": e.message}})
+            raise

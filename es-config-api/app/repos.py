@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from datetime import date
 from typing import Any
+from urllib.parse import quote
 
 from .errors import ApiError, bad_request, conflict, forbidden, not_found
 from .storage import ObjectStore, PreconditionFailed
@@ -385,6 +387,41 @@ class SnapshotRepo:
         except PreconditionFailed as e:
             raise conflict("CONCURRENT_CHANGE",
                            "The snapshot changed while this request was running; retry") from e
+
+
+# --------------------------------------------------------------------------- config history
+class ConfigHistoryRepo:
+    """The state of a resource just before each applied change, one object per change, so any
+    change in the audit log can be undone (not only the latest one, which SnapshotRepo keeps)."""
+
+    def __init__(self, store: ObjectStore):
+        self.store = store
+
+    @staticmethod
+    def prefix(cluster_id: str, config_type: str, resource: str) -> str:
+        return f"config-history/{cluster_id}/{config_type}/{quote(resource, safe='')}/"
+
+    def key(self, cluster_id: str, config_type: str, resource: str, change_id: str) -> str:
+        return f"{self.prefix(cluster_id, config_type, resource)}{change_id}.json"
+
+    def put(self, entry: dict) -> str:
+        key = self.key(entry["clusterId"], entry["configType"], entry["resource"], entry["changeId"])
+        self.store.put_json(key, entry)
+        return key
+
+    def get(self, cluster_id: str, config_type: str, resource: str, change_id: str) -> dict | None:
+        if not re.fullmatch(r"[0-9a-f]{32}", change_id or ""):
+            return None
+        doc, _ = self.store.get_json(self.key(cluster_id, config_type, resource, change_id))
+        return doc
+
+    def list(self, cluster_id: str, config_type: str, resource: str) -> list[dict]:
+        out = []
+        for key in self.store.list_keys(self.prefix(cluster_id, config_type, resource)):
+            doc, _ = self.store.get_json(key)
+            if doc:
+                out.append(doc)
+        return sorted(out, key=lambda d: d.get("at", ""), reverse=True)
 
 
 # --------------------------------------------------------------------------- locks

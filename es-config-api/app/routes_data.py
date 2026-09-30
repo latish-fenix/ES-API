@@ -55,6 +55,13 @@ def _ed(request: Request):
     return request.app.state.data_edit
 
 
+@router.get("/{index}/_recent", summary="Newest document and bulk changes on an index or pattern, for rolling back")
+def recent_changes(cluster_id: str, index: str, request: Request, response: Response,
+                   limit: int = Query(10, ge=1, le=50), user: User = Depends(current_user)):
+    response.headers.update(NO_STORE)
+    return _ed(request).recent(user, cluster_id, index, limit)
+
+
 @router.get("/_changes", summary="Bulk changes on this cluster (newest first), with restore info")
 def bulk_changes(cluster_id: str, request: Request, response: Response, user: User = Depends(current_user)):
     response.headers.update(NO_STORE)

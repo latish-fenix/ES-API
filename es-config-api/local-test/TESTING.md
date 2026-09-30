@@ -59,6 +59,9 @@ the raw API at **http://localhost:8080/docs** (click an endpoint, **Try it out**
 | 21 | **Data** → `products-demo` → click a row → **Edit** | Change one value, **Preview changes**, reason, **Save**; then **History** → **Restore the version before** → reason → **Restore** | The diff shows only your field; after the restore the old value is back and History lists both |
 | 22 | same | Search something that matches a few documents; **Bulk → Update matching documents…**, set a field, **Dry run**, reason, type the count, **Update**; then **Bulk → Bulk changes and undo… → Restore…** | The dry run shows the count and examples; after the update and the restore the documents are back as they were |
 | 23 | **Users** → a user → cluster `local` → **Indices** | Set the cluster level to *Only index rules*, add `products-*` → View, **Save**; sign in as that user | They see only `products-*` under Indices and Data, no templates/ILM/pipelines, and no Edit button on documents |
+| 24 | **Audit log** | Find the ILM policy change from step 7 (or any config change); **Roll back** | A dry run shows the diff back to the state before that change (and a warning if it changed again since); after a reason and **Roll back**, a `RESTORE` row appears and the old row shows **Rolled back** |
+| 25 | **Data** → `products-demo` | Edit a document (step 21), then look at **Recent changes** at the top; **Roll back** the edit | The edit is listed with who, when and why; after the rollback it shows **Rolled back** and the restore is listed too |
+| 26 | **Indices** → **Deleted through the API** | **Recreate** the index deleted in step 13, with a reason | The index is back, empty, with its old mapping; the row says *recreated* and the audit log shows `INDEX_RECREATE` |
 
 Steps 18–22 need the `es_console_api` account to have the `read` and `write` privileges. If you set up
 Elasticsearch before the data browser existed, run `1-start-elasticsearch.cmd` again (it's safe
@@ -175,7 +178,7 @@ With Elasticsearch running (step 1), from the `es-config-api` folder:
 .venv\Scripts\python -m pytest -q
 ```
 
-This runs 69 tests against your local Elasticsearch, with S3 simulated. With the API
+This runs 73 tests against your local Elasticsearch, with S3 simulated. With the API
 running (step 2), you can also run:
 
 ```cmd

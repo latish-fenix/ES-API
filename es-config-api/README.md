@@ -252,7 +252,14 @@ indices the user may see):
   `…/_bulk_delete`. `?dryRun=true` is **mandatory first**: it returns the count, samples and a
   `dryRunToken` (15 minutes); the real call must send the same body plus `dryRunToken`,
   `expectedCount` and `reason`. `GET …/data/_changes` lists bulk changes;
-  `POST …/data/_changes/{changeId}/_restore` puts the documents back (dry run first too)
+  `POST …/data/_changes/{changeId}/_restore` puts the documents back (dry run first too);
+  `GET …/data/{index}/_recent` lists the newest changes on an index, for the Data page's roll back
+- **Roll back any change**: `GET /clusters/{id}/config-history?configType=&resource=` lists every
+  applied config change; `POST /clusters/{id}/config-history/{changeId}/_restore` (body
+  `configType`, `resource`, `reason`; `?dryRun=true`) puts a config back to the state from just
+  before that change, even an older one. `POST /clusters/{id}/deleted-indices/_recreate` (body
+  `key`, `reason`) recreates a deleted index, empty. The console offers all of this as
+  **Roll back** / **Recreate** in the audit log
 
 The Elasticsearch service account needs the `read` and `write` index privileges for these
 (see `docs/es-lockdown.md`).
@@ -315,6 +322,9 @@ deleted-indices/{cluster}/{index}/{time}_{changeId}.json   settings, mappings, a
 doc-versions/{cluster}/{index}/{docId}/{time}_{changeId}.json   a document before each edit/delete/restore
 bulk-changes/{cluster}/{time}_{changeId}.json   what a bulk update/delete/restore did (who, why, counts)
 bulk-backups/{cluster}/{time}_{changeId}.json   the documents as they were before that bulk change
+config-history/{cluster}/{type}/{resource}/{changeId}.json   a config just before each applied change (undo any change)
+doc-changes/{cluster}/{newest-first}_{changeId}_{index}.json   recent document/bulk changes per index (Data page)
+locks/_app/startup/init.lock                 held for a moment while the API workers start
 ```
 
 `doc-versions/` and `bulk-backups/` hold document contents (the data being edited). Keep the

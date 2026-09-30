@@ -12,7 +12,7 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 
-from . import routes_admin, routes_auth, routes_clusters, routes_config, routes_data
+from . import routes_admin, routes_auth, routes_clusters, routes_config, routes_data, routes_history
 from .auth import generate_password, hash_password, password_problems
 from .clusters import ClusterRegistry, load_clusters
 from .errors import ApiError
@@ -135,6 +135,7 @@ def _create_app(settings: Settings, store: ObjectStore, registry: ClusterRegistr
 
     app.include_router(routes_auth.router)
     app.include_router(routes_data.router)  # before routes_config: its /{type}/{name} paths are generic
+    app.include_router(routes_history.router)
     app.include_router(routes_config.router)
     app.include_router(routes_admin.router)
     app.include_router(routes_clusters.router)

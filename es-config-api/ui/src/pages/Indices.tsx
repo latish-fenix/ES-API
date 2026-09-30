@@ -7,6 +7,7 @@ import { Page, useClusterCrumbs } from "../components/Shell";
 import { Callout, Dialog, Empty, ErrorCallout, HealthDot, Loading, ReasonField, SearchInput, copyText, useToast } from "../components/ui";
 import { bytes, LEVEL_LABEL, num, pretty, when } from "../format";
 import { indexAllowed } from "../glob";
+import { RollbackDialog, type RollbackTarget } from "./Rollback";
 import { useCluster, useHealth } from "../session";
 
 const MAX_ROWS = 500;
@@ -18,6 +19,7 @@ export function Indices() {
   const [filter, setFilter] = useState("");
   const [toDelete, setToDelete] = useState<string | null>(null);
   const [definition, setDefinition] = useState<Tombstone | null>(null);
+  const [recreate, setRecreate] = useState<RollbackTarget | null>(null);
   const health = useHealth(clusterId).data;
   const base = `/clusters/${enc(clusterId)}`;
   const c = `/c/${enc(clusterId)}`;
@@ -117,7 +119,15 @@ export function Indices() {
                     <td>{t.reason ?? "—"}</td>
                     <td className="num">{num(t.docsCount)}</td>
                     <td className="num">{bytes(t.storeSizeBytes)}</td>
-                    <td style={{ textAlign: "right" }}><button type="button" className="btn btn-ghost btn-sm" onClick={() => setDefinition(t)}>Definition</button></td>
+                    <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                      <button type="button" className="btn btn-ghost btn-sm" onClick={() => setDefinition(t)}>Definition</button>
+                      {t.recreatedAt ? <span className="hint" title={`Recreated by ${t.recreatedBy}, ${when(t.recreatedAt)}`}> · recreated</span>
+                        : canIndex(t.index, "edit") && !(live.data ?? []).some((r) => r.index === t.index) && (
+                        <button type="button" className="btn btn-ghost btn-sm" onClick={() => setRecreate({ kind: "index", clusterId, key: t.key, index: t.index, label: `the delete of index ${t.index}` })}>
+                          <Icon name="undo" size={14} /> Recreate
+                        </button>
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -128,6 +138,7 @@ export function Indices() {
 
       {toDelete && <DeleteIndexDialog clusterId={clusterId} index={toDelete} onClose={() => setToDelete(null)} />}
       {definition && <DefinitionDialog t={definition} onClose={() => setDefinition(null)} />}
+      {recreate && <RollbackDialog target={recreate} onClose={() => setRecreate(null)} />}
     </Page>
   );
 }

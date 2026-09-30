@@ -1,6 +1,6 @@
 # ES Config API — Endpoint Reference
 
-*Last updated 30 September 2026: index-level permissions, cluster settings for admins only, node stats, document edits and bulk changes with undo, every secret in AWS Secrets Manager. Kept in sync with the shared Claude Doc version of this reference. For the web console see [USER_GUIDE.md](USER_GUIDE.md).*
+*Last updated 30 September 2026: roll back any change (config history, recreate deleted indices, recent document changes), index-level permissions, cluster settings for admins only, node stats, document edits and bulk changes with undo, every secret in AWS Secrets Manager. Kept in sync with the shared Claude Doc version of this reference. For the web console see [USER_GUIDE.md](USER_GUIDE.md).*
 
 ## Basics
 
@@ -835,6 +835,79 @@ curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -X
  "backupKey": "bulk-backups/elkm2-prod/…_5d1f….json", "succeeded": 76, "conflicts": 0, "failed": 0, "errors": []}
 ```
 
+## Roll back any change
+
+Every applied config change keeps the state from just before it (`config-history/…` in S3), so any past change can be undone, not only the latest one (which `…/rollback` does). Document and bulk changes keep their versions and backups (see *Changing documents*), and deleted indices keep their definition. Each rollback has a dry run, needs a `reason`, is audited, and can itself be rolled back.
+
+### GET /api/v1/clusters/{clusterId}/config-history
+
+Every applied change to one config resource, newest first. Needs `view` on it.
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" "http://172.0.58.49/api/v1/clusters/elkm2-prod/config-history?configType=ilm-policies&resource=delest-logs-policy"
+```
+
+```json
+{"clusterId": "elkm2-prod", "configType": "ilm-policies", "resource": "delest-logs-policy", "items": [
+  {"changeId": "1f0c…", "action": "UPDATE", "at": "2026-09-30T10:41:12.004Z", "by": "latish.madapada@fenixcommerce.com",
+   "reason": "Back to normal", "beforeVersion": "9a1…", "afterVersion": "c47…", "restoreOf": null,
+   "createdResource": false, "restorable": true}]}
+```
+
+### POST /api/v1/clusters/{clusterId}/config-history/{changeId}/_restore
+
+Puts a config back to the state from just before change `changeId` (the `changeId` of an `UPDATE`, `ROLLBACK` or `RESTORE` audit entry). Later changes to the same resource are undone too; the dry run warns and shows the diff. If that change created the resource, restoring deletes it. Same checks as an update (`edit` on the resource, allowlist, cluster health; `?force=true` when red). Mappings are refused (`ROLLBACK_NOT_SUPPORTED`).
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -X POST "http://172.0.58.49/api/v1/clusters/elkm2-prod/config-history/5b7e1c0a9f2d4e3a8c6b1d2e3f4a5b6c/_restore?dryRun=true" -d '{"configType": "ilm-policies", "resource": "delest-logs-policy"}'
+```
+
+```json
+{"changeId": "…", "action": "RESTORE", "dryRun": true, "applied": false, "clusterId": "elkm2-prod",
+ "configType": "ilm-policies", "resource": "delest-logs-policy",
+ "diff": {"added": [], "removed": [], "changed": [{"path": "policy.phases.hot.actions.rollover.max_age", "before": "2d", "after": "3d"}]},
+ "warnings": ["This resource changed again after that change (later changes or edits outside the API). Restoring the state from before it undoes those too: check the diff"],
+ "createsResource": false, "deletesResource": false}
+```
+
+Then the same call without `dryRun` and with `"reason": "Undo the peak-season retention change"`. The audit entry is `RESTORE` with `restoreOf` = the change undone. A change made before change history existed returns `404 CHANGE_NOT_FOUND` (except the latest one, which the snapshot still has).
+
+### POST /api/v1/clusters/{clusterId}/deleted-indices/_recreate
+
+Recreates a deleted index **empty**, from its saved settings (minus the ones Elasticsearch manages, such as `uuid` and `creation_date`), mappings and aliases. `key` is from `GET …/deleted-indices`. Needs `edit` on the index name; refused if the name exists again (`INDEX_EXISTS`). Audited as `INDEX_RECREATE`.
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -X POST "http://172.0.58.49/api/v1/clusters/elkm2-prod/deleted-indices/_recreate?dryRun=true" -d '{"key": "deleted-indices/elkm2-prod/scratch-returns-2024.09/2026-09-30T104112.293Z_fffbd704dcb74d0d9c3304ef92660085.json"}'
+```
+
+```json
+{"index": "scratch-returns-2024.09", "dryRun": true, "docsLost": 1, "deletedBy": "latish.madapada@fenixcommerce.com",
+ "deletedAt": "2026-09-30T10:41:12.293Z",
+ "body": {"settings": {"index": {"number_of_shards": "1", "number_of_replicas": "0"}},
+          "mappings": {"properties": {"sku": {"type": "keyword"}}}},
+ "warnings": ["The index is recreated EMPTY: its documents were deleted and can't come back. Reindex or reload the data from its source"]}
+```
+
+### GET /api/v1/clusters/{clusterId}/data/{index}/_recent
+
+The newest document and bulk changes on an index or pattern (`limit`, default 10, max 50), from the indices you may view. Each item says how to roll it back and whether you may (`canRollBack`: `edit` on its index); `rolledBack` is true when a later change in the list undid it. Roll back a `doc` item with `POST …/_doc/{id}/_restore` and its `versionKey`, a `bulk` item with `POST …/data/_changes/{changeId}/_restore`.
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" "http://172.0.58.49/api/v1/clusters/elkm2-prod/data/shoppremiumoutlets.myshopify.com-shipment_summary-2024.09/_recent"
+```
+
+```json
+{"clusterId": "elkm2-prod", "target": "shoppremiumoutlets.myshopify.com-shipment_summary-2024.09", "items": [
+  {"kind": "bulk", "changeId": "92e2…", "action": "BULK_UPDATE", "op": "update", "index": "shoppremiumoutlets.myshopify.com-shipment_summary-2024.09",
+   "at": "2026-09-30T10:41:14.781Z", "by": "latish.madapada@fenixcommerce.com", "reason": "Hold USPS exceptions for vendor 2121",
+   "count": 313, "fields": {"set": ["status"], "remove": []}, "rolledBack": false, "canRollBack": true},
+  {"kind": "doc", "changeId": "a09c…", "action": "UPDATE", "id": "5138593540626", "index": "shoppremiumoutlets.myshopify.com-shipment_summary-2024.09",
+   "at": "2026-09-30T10:41:13.308Z", "by": "latish.madapada@fenixcommerce.com", "reason": "Carrier confirmed delivery",
+   "fields": ["status"], "versionKey": "doc-versions/elkm2-prod/…/5138593540626/…_a09c….json", "rolledBack": true, "canRollBack": true}]}
+```
+
+A bulk change can now also be undone when it was itself a restore (`POST …/_changes/{changeId}/_restore` on the restore's `changeId`): documents it recreated are deleted again.
+
 ## Admin API
 
 Admins only (users with `admin: true`, or listed in `BOOTSTRAP_ADMINS`). Every change made here is written to the audit log.
@@ -1152,7 +1225,7 @@ curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -X
 
 ### GET /api/v1/admin/audit
 
-Returns the audit events for one UTC day, newest first. Filter by `clusterId`, `user` or `action` (`UPDATE`, `ROLLBACK`, `DRY_RUN`, `ADMIN_USER_UPDATE`, `ADMIN_PERMISSIONS_UPDATE`, `ADMIN_USER_DELETE`, `ADMIN_ALLOWLIST_UPDATE`, `ADMIN_ALLOWLIST_DELETE`, `ADMIN_USER_CREATE`, `ADMIN_PASSWORD_RESET`, `ADMIN_CLUSTER_CREATE`, `ADMIN_CLUSTER_UPDATE`, `ADMIN_CLUSTER_DELETE`, `INDEX_DELETE`, `DATA_SEARCH`, `DATA_DOCUMENT`, `DATA_EXPORT`, `DATA_DOC_CREATE`, `DATA_DOC_UPDATE`, `DATA_DOC_DELETE`, `DATA_DOC_RESTORE`, `DATA_BULK_UPDATE`, `DATA_BULK_DELETE`, `DATA_BULK_RESTORE`, `AUTH_LOGIN`, `AUTH_LOGOUT`, `AUTH_LOGOUT_ALL`, `AUTH_PASSWORD_CHANGE`); `limit` defaults to 200.
+Returns the audit events for one UTC day, newest first. Filter by `clusterId`, `user` or `action` (`UPDATE`, `ROLLBACK`, `DRY_RUN`, `ADMIN_USER_UPDATE`, `ADMIN_PERMISSIONS_UPDATE`, `ADMIN_USER_DELETE`, `ADMIN_ALLOWLIST_UPDATE`, `ADMIN_ALLOWLIST_DELETE`, `ADMIN_USER_CREATE`, `ADMIN_PASSWORD_RESET`, `ADMIN_CLUSTER_CREATE`, `ADMIN_CLUSTER_UPDATE`, `ADMIN_CLUSTER_DELETE`, `INDEX_DELETE`, `DATA_SEARCH`, `DATA_DOCUMENT`, `DATA_EXPORT`, `DATA_DOC_CREATE`, `DATA_DOC_UPDATE`, `DATA_DOC_DELETE`, `DATA_DOC_RESTORE`, `DATA_BULK_UPDATE`, `DATA_BULK_DELETE`, `DATA_BULK_RESTORE`, `RESTORE`, `INDEX_RECREATE`, `AUTH_LOGIN`, `AUTH_LOGOUT`, `AUTH_LOGOUT_ALL`, `AUTH_PASSWORD_CHANGE`); `limit` defaults to 200.
 
 ```bash
 curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' "http://172.0.58.49/api/v1/admin/audit?date=2026-09-29&clusterId=elkm2-prod&action=UPDATE"
@@ -1203,10 +1276,12 @@ Every error has the same shape: an HTTP status, a stable `code`, a readable `mes
 | 403 | `ADMIN_REQUIRED` | Admin-only endpoint |
 | 403 | `SYSTEM_INDEX` | Data browser: names and patterns starting with `.` (system and hidden indices) can't be browsed |
 | 404 | `CLUSTER_NOT_FOUND`, `INDEX_NOT_FOUND`, `RESOURCE_NOT_FOUND`, `USER_NOT_FOUND` | Check the id or name |
-| 404 | `VERSION_NOT_FOUND`, `CHANGE_NOT_FOUND` | That saved version or bulk change doesn't exist (or belongs to another document) |
+| 404 | `VERSION_NOT_FOUND`, `CHANGE_NOT_FOUND` | That saved version, bulk change or config change doesn't exist (or belongs to another document or resource); config changes from before change history existed can't be restored |
+| 404 | `TOMBSTONE_NOT_FOUND` | No saved definition under that deleted-index key |
 | 404 | `DOCUMENT_NOT_FOUND` | Data browser: no document with that id in that index |
 | 404 | `NO_SNAPSHOT` | Nothing to roll back yet: no change has been made through the API |
 | 409 | `DOCUMENT_CHANGED` | The document was edited by someone else since you read it; reload it and try again |
+| 409 | `INDEX_EXISTS` | Recreate: an index, alias or data stream with that name exists again |
 | 409 | `DOCUMENT_EXISTS` | A document with that id already exists; edit it instead |
 | 409 | `COUNT_CHANGED` | Documents matching the bulk change changed since the dry run; run it again |
 | 409 | `CLUSTER_EXISTS` | That cluster id is taken (by an added cluster or one in `clusters.yaml`) |

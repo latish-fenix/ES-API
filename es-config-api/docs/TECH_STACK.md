@@ -13,14 +13,14 @@ The project uses two main languages: **Python** for the API and **TypeScript** (
 | Data and secrets | (services) | Elasticsearch 8.17, AWS S3, AWS Secrets Manager |
 | Deployment | Dockerfile, YAML | Docker Compose on EC2 |
 
-Size (lines of code, generated files and docs not counted): 13,901 lines, 94% Python and TypeScript.
+Size (lines of code, generated files and docs not counted): 14,816 lines, 94% Python and TypeScript.
 
 | Part | Language | Lines |
 | --- | --- | --- |
-| Web console | TypeScript | 5,558 |
-| API | Python | 5,557 |
-| Tests | Python | 1,777 |
-| Console styles | CSS | 430 |
+| Web console | TypeScript | 5,905 |
+| API | Python | 5,895 |
+| Tests | Python | 1,992 |
+| Console styles | CSS | 445 |
 | Local test scripts | PowerShell | 252 |
 | Server scripts | Python | 148 |
 | Config and policy | YAML / JSON | 134 |
@@ -74,7 +74,7 @@ There is no database server, message queue or cache service.
 
 | Tool | Used for |
 | --- | --- |
-| **pytest** 8 | 69 tests in `tests/`, run against a real Elasticsearch 8.17 |
+| **pytest** 8 | 73 tests in `tests/`, run against a real Elasticsearch 8.17 |
 | **moto** 5 | Simulates S3 and Secrets Manager in the tests |
 | **httpx** / FastAPI `TestClient`, **requests** | Calling the API in tests and in `scripts/smoke_test.py` |
 | **TypeScript compiler** (`tsc -b`) | Type-checks the console on every build |

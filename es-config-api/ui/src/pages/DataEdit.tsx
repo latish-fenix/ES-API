@@ -21,6 +21,7 @@ function useInvalidateData(clusterId: string) {
     qc.invalidateQueries({ queryKey: ["indices", clusterId] });
     qc.invalidateQueries({ queryKey: ["doc-history", clusterId] });
     qc.invalidateQueries({ queryKey: ["bulk-changes", clusterId] });
+    qc.invalidateQueries({ queryKey: ["data-recent", clusterId] });
   };
 }
 
@@ -379,7 +380,7 @@ export function ChangesDialog({ clusterId, onClose }: { clusterId: string; onClo
                 </td>
                 <td style={{ overflowWrap: "anywhere" }}>{c.reason}</td>
                 <td className="num">{num(c.result?.succeeded ?? c.count)}</td>
-                <td style={{ textAlign: "right" }}>{c.op !== "restore" && <button type="button" className="btn btn-ghost btn-sm" onClick={() => { setPick(c); setPlan(null); dry.mutate(c); }}>Restore…</button>}</td>
+                <td style={{ textAlign: "right" }}><button type="button" className="btn btn-ghost btn-sm" onClick={() => { setPick(c); setPlan(null); dry.mutate(c); }}>{c.op === "restore" ? "Undo…" : "Restore…"}</button></td>
               </tr>
             ))}
           </tbody>

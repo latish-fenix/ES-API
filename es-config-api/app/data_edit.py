@@ -94,6 +94,24 @@ def _stamp() -> str:
     return utcnow().strftime("%Y%m%dT%H%M%S%f")
 
 
+FEED_PREFIX = "doc-changes"
+FEED_SCAN = 2000   # newest feed entries looked at per request
+
+
+def _feed_key(cluster_id: str, index: str, change_id: str) -> str:
+    """Newest first in key order (inverted milliseconds); the index is in the key so a page
+    can be filtered by index before any entry is read."""
+    inv = 10 ** 14 - int(time.time() * 1000)
+    return f"{FEED_PREFIX}/{cluster_id}/{inv:014d}_{change_id}_{_q(index)}.json"
+
+
+def _change_of(version_key: str | None) -> str | None:
+    """The change id in a doc-versions key (<stamp>_<changeId>.json)."""
+    if not version_key:
+        return None
+    return version_key.rsplit("/", 1)[-1].removesuffix(".json").split("_")[-1] or None
+
+
 def _check_field(path: str) -> str:
     p = path.strip()
     if not p or p.startswith("_") or ".." in p or p.startswith(".") or p.endswith(".") or len(p) > 512:
@@ -210,6 +228,49 @@ class DataEditor:
             v["applied"] = True
             self.store.put_json(key, v)
 
+    def _feed(self, cluster_id: str, indices: list[str], entry: dict) -> None:
+        """Recent-changes feed for the Data page (one entry per index touched). Best effort:
+        the change is done; a missing feed entry only hides it from that list."""
+        for idx in indices[:200]:
+            try:
+                self.store.put_json(_feed_key(cluster_id, idx, entry["changeId"]),
+                                    {**entry, "index": idx, "clusterId": cluster_id})
+            except Exception:
+                pass
+
+    def recent(self, user: User, cluster_id: str, target: str, limit: int = 10) -> dict:
+        """Newest single-document and bulk changes on the indices `target` covers that the user
+        may see, each with what's needed to roll it back and whether the user may."""
+        es = self.registry.client(cluster_id)
+        scope = resolve_scope(es, user, cluster_id, target, "view")
+        allowed = {_q(i) for i in scope.permitted}
+        items: list[dict] = []
+        seen: set[str] = set()
+        for key in self.store.list_keys(f"{FEED_PREFIX}/{cluster_id}/", limit=FEED_SCAN):
+            name = key.rsplit("/", 1)[-1].removesuffix(".json")
+            parts = name.split("_", 2)
+            if len(parts) != 3 or parts[2] not in allowed or parts[1] in seen:
+                continue
+            e, _ = self.store.get_json(key)
+            if not e:
+                continue
+            seen.add(parts[1])
+            items.append(e)
+            if len(items) >= limit:
+                break
+        undone = {e.get("restoreOf") for e in items if e.get("restoreOf")}
+        out = []
+        for e in items:
+            kind = e.get("kind")
+            need = "edit"
+            idx_list = e.get("indices") or [e["index"]]
+            out.append({**{k: e.get(k) for k in ("kind", "changeId", "action", "index", "id", "at", "by",
+                                                  "reason", "fields", "count", "versionKey", "restoreOf", "op")},
+                        "rolledBack": e["changeId"] in undone,
+                        "canRollBack": all(user.can_index(cluster_id, scope.names.get(i, i), need) for i in idx_list)
+                                       and (kind != "doc" or bool(e.get("versionKey")))})
+        return {"clusterId": cluster_id, "target": target, "items": out}
+
     @staticmethod
     def _write_error(e: ApiError, doc_id: str) -> ApiError:
         status = (e.details or {}).get("esStatus") if isinstance(e.details, dict) else None
@@ -249,6 +310,9 @@ class DataEditor:
             self._mark_applied(vkey)
             self._audit("DATA_DOC_UPDATE", user, meta, cluster_id, idx, "SUCCESS", documentId=doc_id,
                         changeId=change_id, reason=reason, changedFields=fields, versionKey=vkey)
+            self._feed(cluster_id, [idx], {"kind": "doc", "changeId": change_id, "action": "UPDATE", "id": doc_id,
+                                           "at": iso(), "by": user.username, "reason": reason,
+                                           "fields": fields, "versionKey": vkey})
             return {**out, "applied": True, "changeId": change_id, "versionKey": vkey,
                     "seqNo": r.get("_seq_no"), "primaryTerm": r.get("_primary_term")}
         return self._guard("DATA_DOC_UPDATE", user, meta, cluster_id, index, dry_run, run, documentId=doc_id)
@@ -285,6 +349,9 @@ class DataEditor:
             self._mark_applied(vkey)
             self._audit("DATA_DOC_CREATE", user, meta, cluster_id, real_index, "SUCCESS", documentId=doc_id,
                         changeId=change_id, reason=reason, changedFields=fields, versionKey=vkey)
+            self._feed(cluster_id, [real_index], {"kind": "doc", "changeId": change_id, "action": "CREATE",
+                                                  "id": doc_id, "at": iso(), "by": user.username,
+                                                  "reason": reason, "fields": fields, "versionKey": vkey})
             return {"index": real_index, "id": doc_id, "applied": True, "changeId": change_id,
                     "versionKey": vkey, "seqNo": r.get("_seq_no"), "primaryTerm": r.get("_primary_term")}
         return self._guard("DATA_DOC_CREATE", user, meta, cluster_id, index, dry_run, run, documentId=body.id)
@@ -317,6 +384,8 @@ class DataEditor:
             self._mark_applied(vkey)
             self._audit("DATA_DOC_DELETE", user, meta, cluster_id, idx, "SUCCESS", documentId=doc_id,
                         changeId=change_id, reason=why, versionKey=vkey)
+            self._feed(cluster_id, [idx], {"kind": "doc", "changeId": change_id, "action": "DELETE", "id": doc_id,
+                                           "at": iso(), "by": user.username, "reason": why, "versionKey": vkey})
             return {"index": idx, "id": doc_id, "applied": True, "deleted": True, "changeId": change_id,
                     "versionKey": vkey}
         return self._guard("DATA_DOC_DELETE", user, meta, cluster_id, index, dry_run, run, documentId=doc_id)
@@ -372,7 +441,11 @@ class DataEditor:
             self._mark_applied(vkey)
             self._audit("DATA_DOC_RESTORE", user, meta, cluster_id, idx, "SUCCESS", documentId=doc_id,
                         changeId=change_id, reason=why, restoredFrom=body.versionKey, versionKey=vkey,
-                        changedFields=changed_fields(d))
+                        changedFields=changed_fields(d), restoreOf=_change_of(body.versionKey))
+            self._feed(cluster_id, [idx], {"kind": "doc", "changeId": change_id, "action": "RESTORE", "id": doc_id,
+                                           "at": iso(), "by": user.username, "reason": why,
+                                           "fields": changed_fields(d), "versionKey": vkey,
+                                           "restoreOf": _change_of(body.versionKey)})
             return {**out, "applied": True, "changeId": change_id, "versionKey": vkey}
         return self._guard("DATA_DOC_RESTORE", user, meta, cluster_id, index, dry_run, run, documentId=doc_id)
 
@@ -498,6 +571,11 @@ class DataEditor:
                 for h, new in plans])
             record.update(status="DONE", result=result, finishedAt=iso())
             self.store.put_json(meta_key, record)
+            touched = sorted({h["_index"] for h, _ in plans})
+            self._feed(cluster_id, touched, {"kind": "bulk", "changeId": change_id, "op": op,
+                                             "action": "BULK_" + op.upper(), "at": iso(), "by": user.username,
+                                             "reason": why, "count": result["succeeded"], "fields": fields,
+                                             "indices": touched, "target": t})
             self._audit(action, user, meta, cluster_id, t, "SUCCESS" if not result["failed"] else "FAILED",
                         changeId=change_id, reason=why, count=total, changed=result["succeeded"],
                         conflicts=result["conflicts"], failed=result["failed"], fields=fields,
@@ -553,17 +631,19 @@ class DataEditor:
             rec, _ = self.store.get_json(keys[0])
             backup, _ = self.store.get_json(rec["backupKey"])
             docs = (backup or {}).get("docs", [])
-            denied = sorted({d["_index"] for d in docs if not user.can_index(cluster_id, d["_index"], "edit")})
+            # documents that did not exist before that change (a restore recreated them): deleted again
+            gone = [d for d in (backup or {}).get("missing", []) if d.get("_id")]
+            denied = sorted({d["_index"] for d in docs + gone if not user.can_index(cluster_id, d["_index"], "edit")})
             if denied:
                 raise forbidden("PERMISSION_DENIED", "You need 'edit' on every index this change touched",
                                 {"indices": denied[:50]})
             es = self.registry.client(cluster_id)
             if dry_run:
-                token = self._sign({"restore": change_id, "user": user.username, "count": len(docs),
+                token = self._sign({"restore": change_id, "user": user.username, "count": len(docs) + len(gone),
                                     "exp": int(time.time()) + TOKEN_TTL})
                 self._audit("DATA_BULK_RESTORE", user, meta, cluster_id, rec["index"], "SUCCESS", True,
-                            restoreOf=change_id, count=len(docs))
-                return {"dryRun": True, "changeId": change_id, "count": len(docs), "op": rec["op"],
+                            restoreOf=change_id, count=len(docs) + len(gone))
+                return {"dryRun": True, "changeId": change_id, "count": len(docs) + len(gone), "op": rec["op"],
                         "at": rec["at"], "by": rec["by"], "dryRunToken": token,
                         "note": "Each document is put back exactly as it was before that change; later "
                                 "edits to those documents are overwritten (and backed up first)"}
@@ -585,13 +665,19 @@ class DataEditor:
                                              "missing": [{"_index": d["_index"], "_id": d["_id"]} for d in docs
                                                          if not any(c["_id"] == d["_id"] and c["_index"] == d["_index"] for c in current)][:10_000]})
             result = self._run_bulk(es, [({"index": {"_index": d["_index"], "_id": d["_id"]}}, d["_source"])
-                                         for d in docs])
+                                         for d in docs] +
+                                    [({"delete": {"_index": d["_index"], "_id": d["_id"]}}, None) for d in gone])
             self.store.put_json(f"bulk-changes/{cluster_id}/{stamp}_{new_id_}.json", {
                 "changeId": new_id_, "clusterId": cluster_id, "op": "restore", "index": rec["index"],
                 "at": iso(), "by": user.username, "reason": why, "count": len(docs), "restoreOf": change_id,
                 "backupKey": backup_key, "status": "DONE", "result": result, "indices": rec.get("indices", [])})
             rec.update(restoredBy=user.username, restoredAt=iso())
             self.store.put_json(keys[0], rec)
+            touched = sorted({d["_index"] for d in docs + gone})
+            self._feed(cluster_id, touched, {"kind": "bulk", "changeId": new_id_, "op": "restore",
+                                             "action": "BULK_RESTORE", "at": iso(), "by": user.username,
+                                             "reason": why, "count": result["succeeded"], "restoreOf": change_id,
+                                             "indices": touched, "target": rec["index"]})
             self._audit("DATA_BULK_RESTORE", user, meta, cluster_id, rec["index"],
                         "SUCCESS" if not result["failed"] else "FAILED", changeId=new_id_, reason=why,
                         restoreOf=change_id, count=len(docs), changed=result["succeeded"], failed=result["failed"],

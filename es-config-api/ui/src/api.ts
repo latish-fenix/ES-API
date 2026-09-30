@@ -198,7 +198,7 @@ export interface Diff {
 
 export interface ChangeResult {
   changeId: string;
-  action: "UPDATE" | "ROLLBACK";
+  action: "UPDATE" | "ROLLBACK" | "RESTORE";
   dryRun: boolean;
   applied: boolean;
   noChange?: boolean;
@@ -287,6 +287,8 @@ export interface Tombstone {
   storeSizeBytes: number | null;
   key: string;
   definition: unknown;
+  recreatedAt?: string | null;
+  recreatedBy?: string | null;
 }
 
 export interface DeleteResult {
@@ -438,6 +440,36 @@ export interface BulkPreview {
   conflicts?: number;
   failed?: number;
   errors?: { _index: string; _id: string; error: string }[];
+}
+
+/** A change in the Data page's recent-changes list (GET …/data/{index}/_recent). */
+export interface RecentChange {
+  kind: "doc" | "bulk";
+  changeId: string;
+  action: "UPDATE" | "CREATE" | "DELETE" | "RESTORE" | "BULK_UPDATE" | "BULK_DELETE" | "BULK_RESTORE";
+  index: string;
+  id?: string | null;
+  at: string;
+  by: string;
+  reason: string | null;
+  fields?: string[] | { set: string[]; remove: string[] } | null;
+  count?: number | null;
+  versionKey?: string | null;
+  restoreOf?: string | null;
+  op?: string | null;
+  rolledBack: boolean;
+  canRollBack: boolean;
+}
+
+export interface RecreatePlan {
+  index: string;
+  dryRun: boolean;
+  applied?: boolean;
+  body: { settings: Record<string, unknown>; mappings?: Record<string, unknown>; aliases?: Record<string, unknown> };
+  warnings: string[];
+  deletedAt: string;
+  deletedBy: string;
+  docsLost: number | null;
 }
 
 export interface BulkChange {
