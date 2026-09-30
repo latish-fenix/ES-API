@@ -18,8 +18,10 @@ router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
 
 class UserBody(BaseModel):
     admin: bool = False
-    clusters: dict[str, str] = Field(default_factory=dict,
-                                     description="{clusterId or '*': 'view' | 'edit' | 'delete'}")
+    clusters: dict[str, Any] = Field(
+        default_factory=dict,
+        description="{clusterId or '*': 'view' | 'edit' | 'delete'} or, for index-level access, "
+                    "{clusterId: {\"default\": 'view'|null, \"indices\": [{\"pattern\": \"shop*\", \"level\": 'edit'}]}}")
 
 
 class NewUserBody(UserBody):
@@ -171,7 +173,9 @@ def put_user(username: str, body: UserBody, request: Request,
 
 @router.put("/users/{username}/permissions", summary="Set per-cluster permissions")
 def put_permissions(username: str, request: Request,
-                    body: dict[str, str] = Body(..., examples=[{"prod-us": "edit", "prod-eu": "view"}]),
+                    body: dict[str, Any] = Body(..., examples=[{"prod-us": "edit", "prod-eu": {
+                        "default": "view", "indices": [{"pattern": "orders-*", "level": "edit"},
+                                                       {"pattern": "payments-*", "level": "none"}]}}]),
                     admin: User = Depends(require_admin)):
     username = normalize_username(username)
     clusters = validate_permissions(body, request.app.state.registry.ids())

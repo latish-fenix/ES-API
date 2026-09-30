@@ -7,13 +7,40 @@ $EsHome      = Join-Path $env:USERPROFILE "es-local"                  # outside 
 $EsDir       = Join-Path $EsHome "elasticsearch-$EsVersion"
 $EsUrl       = "http://127.0.0.1:9200"
 $EsUser      = "elastic"
-$EsPassword  = "changeme123"        # local test only
-$SvcUser     = "config_api"
-$SvcPassword = "svc-pass-123"       # local test only
+$SvcUser     = "es_console_api"      # the API's own Elasticsearch account (no other users are created)
 $ProjectDir  = Split-Path -Parent $PSScriptRoot
 $ApiPort     = 8080
 $AdminUser   = "latish.madapada@fenixcommerce.com"
-$AdminPassword = "Local-Test-Admin-2026"   # local test only; change it at first sign-in
+
+# Passwords are generated on the first run (nothing is hard-coded) and kept in
+# local-test\.secrets\local-passwords.json, which is never committed.
+$SecretsDir    = Join-Path $PSScriptRoot ".secrets"
+$PasswordsFile = Join-Path $SecretsDir "local-passwords.json"
+
+function New-Password([int]$Length = 24) {
+    $chars = [char[]]"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
+    $bytes = New-Object byte[] $Length
+    [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+    return -join ($bytes | ForEach-Object { $chars[$_ % $chars.Length] })
+}
+
+if (Test-Path $PasswordsFile) {
+    $Passwords = Get-Content -Raw $PasswordsFile | ConvertFrom-Json
+} else {
+    New-Item -ItemType Directory -Force -Path $SecretsDir | Out-Null
+    # An Elasticsearch installed by an older version of these scripts keeps its old 'elastic'
+    # password; delete %USERPROFILE%\es-local for a completely fresh install.
+    $oldInstall = Test-Path (Join-Path $EsDir "bin\elasticsearch.bat")
+    $Passwords = [pscustomobject]@{
+        elastic = $(if ($oldInstall) { "changeme123" } else { New-Password })
+        service = New-Password
+        admin   = New-Password
+    }
+    $Passwords | ConvertTo-Json | Set-Content -Encoding ascii $PasswordsFile
+}
+$EsPassword    = $Passwords.elastic
+$SvcPassword   = $Passwords.service
+$AdminPassword = $Passwords.admin    # first console password; change it at first sign-in
 
 function Write-Step($msg) { Write-Host "`n==> $msg" -ForegroundColor Cyan }
 function Write-Ok($msg)   { Write-Host "    OK  $msg" -ForegroundColor Green }

@@ -12,3 +12,6 @@ ui/node_modules/
 *.tsbuildinfo
 local-test/clusters.managed.yaml*
 data/
+
+.local-secrets/
+local-test/.secrets/

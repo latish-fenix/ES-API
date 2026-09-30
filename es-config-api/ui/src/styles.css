@@ -410,3 +410,21 @@ details > summary { cursor: pointer; }
 .filter-row .chip { white-space: nowrap; max-width: 100%; }
 .filter-row .chip .chip-text { overflow: hidden; text-overflow: ellipsis; max-width: 420px; }
 .mini-btn { min-height: 28px; height: 28px; width: 28px; padding: 0; justify-content: center; }
+.index-rules { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; border: 1px dashed var(--border-strong); border-radius: var(--radius); background: var(--surface-2); }
+.meter { min-width: 120px; display: flex; flex-direction: column; gap: 4px; }
+.meter-top { display: flex; justify-content: space-between; gap: 8px; font-size: 12.5px; white-space: nowrap; }
+.meter-track { height: 6px; border-radius: 999px; background: var(--surface-3); overflow: hidden; }
+.meter-fill { height: 100%; border-radius: 999px; background: var(--accent); }
+.meter-fill.warn { background: var(--yellow); }
+.meter-fill.danger { background: var(--red); }
+.nodes-table td { vertical-align: top; }
+@media (max-width: 900px) { .stats { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; } }
+.menu-wrap { position: relative; }
+.menu { position: absolute; right: 0; top: calc(100% + 4px); z-index: 20; min-width: 250px; display: flex; flex-direction: column; padding: 6px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow); }
+.menu button { text-align: left; padding: 8px 10px; border: 0; border-radius: 6px; background: none; color: var(--text); font: 14px var(--font-sans); cursor: pointer; }
+.menu button:hover:not(:disabled) { background: var(--surface-2); }
+.menu button:disabled { color: var(--faint); cursor: default; }
+.menu button.danger { color: var(--danger); }
+details.sample { border: 1px solid var(--border); border-radius: var(--radius); padding: 6px 10px; }
+details.sample summary { cursor: pointer; font-size: 13px; }
+details.sample[open] summary { margin-bottom: 8px; }

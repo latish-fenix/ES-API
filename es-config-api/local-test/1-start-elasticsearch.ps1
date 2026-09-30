@@ -61,18 +61,18 @@ path.logs: $logs
     Write-Ok "Elasticsearch $((Invoke-Es GET '/').version.number) is up at $EsUrl"
 }
 
-Write-Step "Creating roles and users (safe to repeat)"
+Write-Step "Creating the API's service account (safe to repeat)"
 Invoke-Es PUT "/_security/role/config_api_writer" @{
     cluster = @("monitor", "manage", "manage_ilm", "manage_index_templates", "manage_pipeline")
-    indices = @(@{ names = @("*"); privileges = @("monitor", "view_index_metadata", "manage", "read") })
+    indices = @(@{ names = @("*"); privileges = @("monitor", "view_index_metadata", "manage", "read", "write") })
 } | Out-Null
 Invoke-Es POST "/_security/user/$SvcUser" @{ password = $SvcPassword; roles = @("config_api_writer") } | Out-Null
-Invoke-Es PUT "/_security/role/config_reader" @{
-    cluster = @("monitor", "read_ilm", "read_pipeline")
-    indices = @(@{ names = @("*"); privileges = @("read", "view_index_metadata", "monitor") })
-} | Out-Null
-Invoke-Es POST "/_security/user/reader" @{ password = "reader-pass"; roles = @("config_reader") } | Out-Null
-Write-Ok "config_api (used by the API) and reader (read-only person) are ready"
+# Older versions of this script created two demo users, 'config_api' and 'reader': remove them
+foreach ($old in @("config_api", "reader")) {
+    try { Invoke-Es DELETE "/_security/user/$old" | Out-Null; Write-Ok "Removed the old demo user '$old'" } catch {}
+}
+try { Invoke-Es DELETE "/_security/role/config_reader" | Out-Null } catch {}
+Write-Ok "$SvcUser (the API's account) is ready; passwords are in $PasswordsFile"
 
 Write-Step "Creating demo data (safe to repeat)"
 try { Invoke-Es GET "/products-demo" | Out-Null } catch {

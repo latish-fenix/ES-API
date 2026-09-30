@@ -16,24 +16,34 @@ def test_missing_and_unknown_user(client):
     assert r.status_code == 403 and r.json()["error"]["code"] == "UNKNOWN_USER"
 
 
-def test_permissions_view_vs_edit(client, open_allowlist):
+def test_permissions_view_vs_edit(client, open_allowlist, es, prefix):
+    idx = f"{prefix}-perm"
+    es("PUT", f"/{idx}", json={"settings": {"number_of_replicas": 0}})
     r = client.put("/api/v1/admin/users/alice", json={"clusters": {"test": "view"}}, headers=ROOT)
     assert r.status_code == 200, r.text
     alice = as_user("alice")
     clusters = client.get("/api/v1/clusters", headers=alice).json()["items"]
     assert [c["id"] for c in clusters] == ["test"] and clusters[0]["permission"] == "view"
-    assert client.get(f"{API}/cluster-settings", headers=alice).status_code == 200
-    r = client.put(f"{API}/cluster-settings", json={"config": {"x": "y"}, **REASON}, headers=alice)
+    assert client.get(f"{API}/indices/{idx}/settings", headers=alice).status_code == 200
+    body = {"config": {"index.refresh_interval": "5s"}, **REASON}
+    r = client.put(f"{API}/indices/{idx}/settings", json=body, headers=alice)
     assert r.status_code == 403 and r.json()["error"]["code"] == "PERMISSION_DENIED"
-    assert client.get("/api/v1/clusters/other/cluster-settings", headers=alice).status_code == 403
+    assert client.get(f"/api/v1/clusters/other/indices/{idx}/settings", headers=alice).status_code == 403
+    # cluster settings are admin-only now, whatever the cluster level
+    r = client.get(f"{API}/cluster-settings", headers=alice)
+    assert r.status_code == 403 and r.json()["error"]["code"] == "ADMIN_REQUIRED"
     # admin endpoints are admin-only
     assert client.get("/api/v1/admin/users", headers=alice).status_code == 403
     # upgrade to edit via the permissions endpoint
     r = client.put("/api/v1/admin/users/alice/permissions", json={"test": "edit"}, headers=ROOT)
     assert r.json()["clusters"] == {"test": "edit"}
+    r = client.put(f"{API}/indices/{idx}/settings?dryRun=true", json=body, headers=alice)
+    assert r.status_code == 200, r.text
     r = client.put(f"{API}/cluster-settings?dryRun=true",
                    json={"config": {"indices.recovery.max_bytes_per_sec": "41mb"}}, headers=alice)
-    assert r.status_code == 200, r.text
+    assert r.status_code == 403
+    assert client.put(f"{API}/cluster-settings?dryRun=true", headers=ROOT,
+                      json={"config": {"indices.recovery.max_bytes_per_sec": "41mb"}}).status_code == 200
 
 
 def test_permissions_validation(client):
@@ -487,3 +497,16 @@ def test_template_index_patterns_are_checked(client, prefix):
     assert r.status_code == 403 and r.json()["error"]["details"]["blocked"] == ["metrics-*"]
     r = client.put(f"{base}?dryRun=true", json={"config": {"index_patterns": ["logs-app-*"]}}, headers=ROOT)
     assert r.status_code == 200, r.text
+
+
+def test_nodes_overview(client):
+    r = client.get(f"{API}/nodes", headers=ROOT)
+    assert r.status_code == 200, r.text
+    d = r.json()
+    assert d["summary"]["nodes"] >= 1 and d["summary"]["diskTotalBytes"] > 0
+    n = d["nodes"][0]
+    for k in ("name", "ip", "roles", "cpuPercent", "memUsedPercent", "heapUsedPercent",
+              "diskAvailableBytes", "diskUsedPercent"):
+        assert k in n, k
+    assert any(x["master"] for x in d["nodes"]) and d["watermarks"]["high"] == 90.0
+    assert client.get(f"{API}/nodes", headers=as_user("nobody")).status_code == 403

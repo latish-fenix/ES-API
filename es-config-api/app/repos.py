@@ -9,6 +9,7 @@ from typing import Any
 
 from .errors import ApiError, bad_request, conflict, forbidden, not_found
 from .storage import ObjectStore, PreconditionFailed
+from .secret_store import user_secret
 from .util import iso, matches_any, new_id, utcnow
 
 log = logging.getLogger("es_config_api.audit")
@@ -40,12 +41,54 @@ def _update_with_retry(store: ObjectStore, key: str, mutate, default: dict, atte
 
 # --------------------------------------------------------------------------- users
 class UsersRepo:
+    """Users and permissions in S3 (state/users.json); password hashes in Secrets Manager.
+
+    The S3 record only says whether a password is set (hasPassword) and when; the scrypt
+    hash itself lives in the secret ``<prefix>users/<email>`` and is read only when someone
+    signs in or changes their password."""
+
     KEY = "state/users.json"
     SECRET_FIELDS = ("passwordHash",)
 
-    def __init__(self, store: ObjectStore, bootstrap_admins: list[str]):
+    def __init__(self, store: ObjectStore, bootstrap_admins: list[str], secrets=None):
         self.store = store
         self.bootstrap_admins = set(bootstrap_admins)
+        self.secrets = secrets
+
+    # -- password hashes (Secrets Manager)
+    def password_hash(self, username: str) -> str | None:
+        if self.secrets is not None:
+            doc = self.secrets.get(user_secret(username))
+            if doc and doc.get("passwordHash"):
+                return doc["passwordHash"]
+        rec = self._all().get(username) or {}
+        return rec.get("passwordHash")  # not yet migrated
+
+    def _save_hash(self, username: str, password_hash: str) -> bool:
+        """True when stored in the secret store (the S3 record then keeps no hash)."""
+        if self.secrets is None:
+            return False
+        self.secrets.put(user_secret(username), {"passwordHash": password_hash},
+                         f"ES Config API console password hash for {username}")
+        return True
+
+    def migrate_hashes(self) -> list[str]:
+        """Move any password hash still in S3 into Secrets Manager (idempotent)."""
+        if self.secrets is None:
+            return []
+        legacy = {n: r["passwordHash"] for n, r in self._all().items() if r.get("passwordHash")}
+        for name, h in legacy.items():
+            self._save_hash(name, h)
+
+        def mutate(doc):
+            moved = []
+            for name, rec in doc["users"].items():
+                if rec.get("passwordHash") and name in legacy:
+                    rec.pop("passwordHash", None)
+                    rec["hasPassword"] = True
+                    moved.append(name)
+            return moved
+        return _update_with_retry(self.store, self.KEY, mutate, {"users": {}}) if legacy else []
 
     def _all(self) -> dict[str, dict]:
         data, _ = self.store.get_json(self.KEY)
@@ -56,6 +99,7 @@ class UsersRepo:
             return None
         rec = dict(rec or {"admin": False, "clusters": {}})
         rec["username"] = username
+        rec["hasPassword"] = bool(rec.get("hasPassword") or rec.get("passwordHash"))
         rec["bootstrap"] = username in self.bootstrap_admins
         if rec["bootstrap"]:
             rec["admin"] = True
@@ -67,8 +111,9 @@ class UsersRepo:
         if rec is None:
             return None
         out = {k: v for k, v in rec.items() if k not in cls.SECRET_FIELDS}
-        out["hasPassword"] = bool(rec.get("passwordHash"))
-        out["usingGeneratedPassword"] = bool(rec.get("passwordHash") and rec.get("passwordGenerated"))
+        has = bool(rec.get("hasPassword") or rec.get("passwordHash"))
+        out["hasPassword"] = has
+        out["usingGeneratedPassword"] = bool(has and rec.get("passwordGenerated"))
         return out
 
     def list(self) -> list[dict]:
@@ -80,25 +125,32 @@ class UsersRepo:
         return self.public(self._full(username, self._all().get(username)))
 
     def get_auth(self, username: str) -> dict | None:
-        """Full record, including the password hash. Never return this from the API."""
+        """Full S3 record (permissions, token version, lockout). The password hash is not
+        in it: use password_hash(). Never return this from the API."""
         return self._full(username, self._all().get(username))
 
     def exists(self, username: str) -> bool:
         return username in self._all()
 
-    def put(self, username: str, admin: bool, clusters: dict[str, str], by: str,
+    def put(self, username: str, admin: bool, clusters: dict[str, Any], by: str,
             password_hash: str | None = None, generated: bool = False) -> dict:
         """Create or update admin flag + permissions. Password fields are kept unless
         a new hash is given (used when creating a user)."""
+        in_secret = self._save_hash(username, password_hash) if password_hash else False
+
         def mutate(doc):
             prev = doc["users"].get(username)
             rec = dict(prev or {"createdAt": iso(), "createdBy": by, "tokenVersion": 0})
             rec.update({"admin": bool(admin), "clusters": clusters, "updatedAt": iso(),
                         "updatedBy": by})
             if password_hash:
-                rec.update(passwordHash=password_hash, passwordGenerated=generated,
+                rec.update(hasPassword=True, passwordGenerated=generated,
                            passwordSetAt=iso(), failedLogins=0, lockedUntil=None,
                            tokenVersion=int(rec.get("tokenVersion", 0)) + 1)
+                if in_secret:
+                    rec.pop("passwordHash", None)
+                else:
+                    rec["passwordHash"] = password_hash
             doc["users"][username] = rec
             return prev
         prev = _update_with_retry(self.store, self.KEY, mutate, {"users": {}})
@@ -106,6 +158,8 @@ class UsersRepo:
 
     def set_password(self, username: str, password_hash: str, generated: bool, by: str) -> int:
         """Set a password; bumps tokenVersion so every older session stops working."""
+        in_secret = self._save_hash(username, password_hash)
+
         def mutate(doc):
             rec = doc["users"].get(username)
             if rec is None:
@@ -113,9 +167,13 @@ class UsersRepo:
                     raise not_found("USER_NOT_FOUND", f"Unknown user '{username}'")
                 rec = {"admin": True, "clusters": {}, "createdAt": iso(), "tokenVersion": 0}
             version = int(rec.get("tokenVersion", 0)) + 1
-            rec.update(passwordHash=password_hash, passwordGenerated=generated,
+            rec.update(hasPassword=True, passwordGenerated=generated,
                        passwordSetAt=iso(), passwordSetBy=by, failedLogins=0,
                        lockedUntil=None, tokenVersion=version)
+            if in_secret:
+                rec.pop("passwordHash", None)
+            else:
+                rec["passwordHash"] = password_hash
             doc["users"][username] = rec
             return version
         return _update_with_retry(self.store, self.KEY, mutate, {"users": {}})
@@ -150,7 +208,7 @@ class UsersRepo:
             return {"locked": locked, "lockedUntil": rec.get("lockedUntil"), "failed": failed}
         return _update_with_retry(self.store, self.KEY, mutate, {"users": {}})
 
-    def set_permissions(self, username: str, clusters: dict[str, str], by: str) -> dict:
+    def set_permissions(self, username: str, clusters: dict[str, Any], by: str) -> dict:
         def mutate(doc):
             rec = doc["users"].get(username)
             if rec is None:
@@ -185,7 +243,10 @@ class UsersRepo:
             if username not in doc["users"]:
                 raise not_found("USER_NOT_FOUND", f"Unknown user '{username}'")
             return doc["users"].pop(username)
-        return self.public(_update_with_retry(self.store, self.KEY, mutate, {"users": {}}))
+        removed = self.public(_update_with_retry(self.store, self.KEY, mutate, {"users": {}}))
+        if self.secrets is not None:
+            self.secrets.delete(user_secret(username))
+        return removed
 
 
 # ----------------------------------------------------------------------- allowlist
@@ -417,17 +478,51 @@ class AuditRepo:
         return out
 
 
-def validate_permissions(clusters: Any, known: set[str]) -> dict[str, str]:
+def validate_permissions(clusters: Any, known: set[str]) -> dict[str, Any]:
+    """{clusterId|'*': level} or {clusterId: {"default": level|null, "indices": [rules]}}."""
     if not isinstance(clusters, dict):
-        raise bad_request("INVALID_PERMISSIONS", "Permissions must be {clusterId: 'view'|'edit'}")
+        raise bad_request("INVALID_PERMISSIONS", "Permissions must be {clusterId: 'view'|'edit'|'delete'} "
+                          "or {clusterId: {default, indices: [{pattern, level}]}}")
     unknown = sorted(set(clusters) - known - {"*"})
     if unknown:
         raise bad_request("UNKNOWN_CLUSTER", f"Unknown cluster ids: {unknown}",
                           {"knownClusters": sorted(known)})
-    bad = {k: v for k, v in clusters.items() if v not in LEVELS}
-    if bad:
-        raise bad_request("INVALID_PERMISSIONS", "Permission level must be 'view', 'edit' or 'delete'", bad)
-    return dict(clusters)
+    out: dict[str, Any] = {}
+    for cid, v in clusters.items():
+        if isinstance(v, str):
+            if v not in LEVELS:
+                raise bad_request("INVALID_PERMISSIONS", "Permission level must be 'view', 'edit' or 'delete'",
+                                  {cid: v})
+            out[cid] = v
+            continue
+        if not isinstance(v, dict) or set(v) - {"default", "indices"}:
+            raise bad_request("INVALID_PERMISSIONS", f"'{cid}': use a level or {{default, indices}}", {cid: v})
+        default = v.get("default")
+        if default in ("", "none"):
+            default = None
+        if default is not None and default not in LEVELS:
+            raise bad_request("INVALID_PERMISSIONS", f"'{cid}': default must be view, edit, delete or none",
+                              {cid: v})
+        rules, seen = [], set()
+        for r in v.get("indices") or []:
+            pat = str((r or {}).get("pattern", "")).strip()
+            lvl = (r or {}).get("level")
+            if not pat or len(pat) > 255 or "," in pat or " " in pat or pat.startswith("."):
+                raise bad_request("INVALID_PERMISSIONS", f"'{cid}': bad index pattern {pat!r} (no commas, "
+                                  "spaces or leading dot)", {cid: v})
+            if lvl not in (*LEVELS, "none"):
+                raise bad_request("INVALID_PERMISSIONS", f"'{cid}': level for {pat!r} must be none, view, "
+                                  "edit or delete", {cid: v})
+            if pat in seen:
+                raise bad_request("INVALID_PERMISSIONS", f"'{cid}': pattern {pat!r} is listed twice", {cid: v})
+            seen.add(pat)
+            rules.append({"pattern": pat, "level": lvl})
+        if len(rules) > 100:
+            raise bad_request("INVALID_PERMISSIONS", f"'{cid}': at most 100 index rules")
+        if default is None and not rules:
+            continue  # no access at all: leave the cluster out
+        out[cid] = default if not rules else {"default": default, "indices": rules}
+    return out
 
 
 __all__ = ["UsersRepo", "AllowlistRepo", "SnapshotRepo", "LockRepo", "AuditRepo",

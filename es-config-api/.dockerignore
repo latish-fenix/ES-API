@@ -11,3 +11,6 @@ ui/node_modules
 app/static/ui
 data
 local-test/clusters.managed.yaml*
+
+.local-secrets
+local-test/.secrets

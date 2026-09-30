@@ -1,6 +1,6 @@
 # ES Config API — Endpoint Reference
 
-*Last updated 29 September 2026 (cluster management and the data browser added). Kept in sync with the shared Claude Doc version of this reference. For the web console see [USER_GUIDE.md](USER_GUIDE.md).*
+*Last updated 30 September 2026: index-level permissions, cluster settings for admins only, node stats, document edits and bulk changes with undo, every secret in AWS Secrets Manager. Kept in sync with the shared Claude Doc version of this reference. For the web console see [USER_GUIDE.md](USER_GUIDE.md).*
 
 ## Basics
 
@@ -23,12 +23,14 @@ curl -s -H "Authorization: Bearer %TOKEN%" -H "Content-Type: application/json" -
 
 **Who can call what**
 
+Each user has, per cluster, a **default level** and optional **index rules** (an index pattern with its own level, `none` to hide matching indices; the most specific matching pattern wins). For index settings, mappings, index delete and documents the user's level **on that index** counts; for templates, ILM policies and pipelines the cluster default counts.
+
 | Access | Can do |
 | --- | --- |
-| `view` on a cluster | All GET endpoints for that cluster, and the read-only data browser (search, read and export documents) |
-| `edit` on a cluster | Also update, dry run and rollback |
-| `delete` on a cluster | Also delete indices (the index must also match the `index-delete` allowlist) |
-| `admin` | Everything, on every cluster, plus the `/admin` endpoints |
+| `view` | Read config; search, read and export documents |
+| `edit` | Also update, dry run and roll back; create, edit and delete single documents; bulk update |
+| `delete` | Also delete indices (the index must also match the `index-delete` allowlist); bulk delete documents |
+| `admin` | Everything, on every cluster, including **cluster settings** (admins only) and the `/admin` endpoints |
 
 **Request body for every update** (PUT):
 
@@ -102,8 +104,13 @@ curl -s -H "Authorization: Bearer $TOKEN" http://172.0.58.49/api/v1/me
 ```
 
 ```json
-{"username": "latish.madapada@fenixcommerce.com", "admin": true, "authMode": "password", "usingGeneratedPassword": true, "lastLoginAt": "2026-09-29T06:39:20.390Z", "clusters": {"elkm2-prod": "delete"}}
+{"username": "priya@fenixcommerce.com", "admin": false, "authMode": "password", "usingGeneratedPassword": false,
+ "lastLoginAt": "2026-09-30T06:39:20.390Z",
+ "clusters": {"elkm2-prod": "view"},
+ "access": {"elkm2-prod": {"default": "view", "indices": [{"pattern": "shoppremium*", "level": "edit"}]}}}
 ```
+
+`clusters` is the cluster-wide level; `access` adds the index rules for every cluster the user can open.
 
 ### POST /api/v1/auth/change-password
 
@@ -186,9 +193,34 @@ curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' ht
 {"clusterId": "elkm2-prod", "items": [{"index": "delest-log-2026.09.26", "health": "green", "status": "open", "docs.count": "72523139"}, {"index": "my-index", "health": "green", "status": "open", "docs.count": "1"}]}
 ```
 
+### GET /api/v1/clusters/{clusterId}/nodes
+
+Every node with its CPU, RAM, JVM heap, disk and shard count, a cluster summary, and the disk watermarks. Any access on the cluster is enough. The console's Overview refreshes it every 30 seconds.
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" http://172.0.58.49/api/v1/clusters/elkm2-prod/nodes
+```
+
+```json
+{"clusterId": "elkm2-prod",
+ "nodes": [{"id": "0IMKiA7lTRmaVDb5qK2ZpA", "name": "node-1", "ip": "10.0.4.31", "version": "8.17.1",
+   "roles": ["data", "ingest", "master", "ml"], "master": true, "data": true,
+   "cpuPercent": 12, "load1m": 0.12, "cpus": 2,
+   "memTotalBytes": 6273757184, "memUsedBytes": 2333827072, "memUsedPercent": 37,
+   "heapUsedBytes": 505386352, "heapMaxBytes": 1073741824, "heapUsedPercent": 47,
+   "diskTotalBytes": 270553174016, "diskAvailableBytes": 28409073664, "diskUsedPercent": 89.5,
+   "shards": 10, "uptimeMillis": 2101268}],
+ "summary": {"nodes": 1, "dataNodes": 1, "diskTotalBytes": 270553174016, "diskAvailableBytes": 28409073664,
+   "diskUsedPercent": 89.5, "cpuPercentAvg": 12.0, "cpuPercentMax": 12, "memUsedPercentAvg": 37.0,
+   "heapUsedPercentAvg": 47.0, "heapUsedPercentMax": 47},
+ "watermarks": {"low": 85.0, "high": 90.0, "flood": 95.0}}
+```
+
+`diskAvailableBytes` is what Elasticsearch can still use (it compares that with the watermarks). `memUsedPercent` is the operating system's view and includes the file-system cache on Linux, so a high value is normal; watch `heapUsedPercent` and disk instead.
+
 ## Cluster settings
 
-Persistent cluster-wide settings (`_cluster/settings`). Updates are partial: send only the keys you want to change; `null` resets a key to its Elasticsearch default. Keys must be on the allowlist.
+**Admins only** (every endpoint in this section returns `403 ADMIN_REQUIRED` for other users). Persistent cluster-wide settings (`_cluster/settings`). Updates are partial: send only the keys you want to change; `null` resets a key to its Elasticsearch default. Keys must be on the allowlist.
 
 ### GET /api/v1/clusters/{clusterId}/cluster-settings
 
@@ -496,9 +528,9 @@ Shows the stored snapshot a rollback would restore. `state.exists: false` means 
 curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' http://172.0.58.49/api/v1/clusters/elkm2-prod/ilm-policies/logs-30d/previous
 ```
 
-## Data browser (read-only)
+## Data
 
-Search and read the documents in an index. `view` access on the cluster is enough. Only non-system indices: a name or pattern starting with `.` is refused (`SYSTEM_INDEX`), and wildcards never reach dot or hidden indices. Every search, document read and export is written to the audit log (`DATA_SEARCH`, `DATA_DOCUMENT`, `DATA_EXPORT`) with the query and the hit count, never the documents. Responses carry `Cache-Control: no-store`.
+Search and read the documents in an index (`view` on it), and change them (`edit` / `delete`, see *Changing documents* below). A search on a pattern only returns documents from the indices the user may view; `hiddenIndices` in the response says how many matching indices were left out. Only non-system indices: a name or pattern starting with `.` is refused (`SYSTEM_INDEX`), and wildcards never reach dot or hidden indices. Every search, document read and export is written to the audit log (`DATA_SEARCH`, `DATA_DOCUMENT`, `DATA_EXPORT`) with the query and the hit count, never the documents. Responses carry `Cache-Control: no-store`.
 
 `{index}` in the paths below is one index name, alias or wildcard pattern, e.g. `shoppremiumoutlets.myshopify.com-shipment_summary-2024.09` or `shoppremiumoutlets*-2024.*` (no commas). The API's Elasticsearch account needs the `read` index privilege (see `docs/es-lockdown.md`); without it searches fail with `ES_READ_NOT_ALLOWED`.
 
@@ -611,6 +643,198 @@ A system index is refused before Elasticsearch is asked:
 {"error": {"code": "SYSTEM_INDEX", "message": "System and hidden indices (names starting with '.') can't be browsed"}}
 ```
 
+### Changing documents
+
+With `edit` on an index you can create, replace and delete its documents; with `delete` you can also bulk-delete. Every change:
+
+- needs a `reason` (except dry runs) and is audited as `DATA_DOC_CREATE` / `DATA_DOC_UPDATE` / `DATA_DOC_DELETE` / `DATA_DOC_RESTORE` / `DATA_BULK_UPDATE` / `DATA_BULK_DELETE` / `DATA_BULK_RESTORE`, with the field names that changed, never values;
+- saves the document's previous state to S3 first (`doc-versions/…` for one document, `bulk-backups/…` for bulk), so it can be put back;
+- works on a concrete index (not a pattern or alias). Documents in data streams are read-only here; system indices are refused.
+
+The API's Elasticsearch account needs the `write` index privilege; without it writes fail with `ES_WRITE_NOT_ALLOWED`.
+
+### PUT /api/v1/clusters/{clusterId}/data/{index}/_doc/{id}
+
+Replaces a document with `document` (the whole `_source`). Send the `_seq_no` / `_primary_term` you read as `ifSeqNo` / `ifPrimaryTerm`: if someone changed the document since, it is refused (`DOCUMENT_CHANGED`) instead of overwritten. `?dryRun=true` returns the field-level diff and changes nothing.
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -X PUT "http://172.0.58.49/api/v1/clusters/elkm2-prod/data/shoppremiumoutlets.myshopify.com-shipment_summary-2024.09/_doc/5138553937707?dryRun=true" -d '{
+  "document": {"vendor": "2593", "status": "delivered", "carrier": "UPS", "order_info": {"order_number": "SP0286300037"}},
+  "ifSeqNo": 12501, "ifPrimaryTerm": 2
+}'
+```
+
+```json
+{"index": "shoppremiumoutlets.myshopify.com-shipment_summary-2024.09", "id": "5138553937707", "dryRun": true, "noChange": false,
+ "diff": {"added": [], "removed": [], "changed": [{"path": "status", "before": "exception", "after": "delivered"}]},
+ "seqNo": 12501, "primaryTerm": 2}
+```
+
+Run it again without `dryRun` and with `"reason": "Carrier confirmed delivery"`:
+
+```json
+{"index": "shoppremiumoutlets.myshopify.com-shipment_summary-2024.09", "id": "5138553937707", "applied": true,
+ "changeId": "a09c56f61518406e8f88ef471818fef1", "seqNo": 14069, "primaryTerm": 2,
+ "versionKey": "doc-versions/elkm2-prod/shoppremiumoutlets.myshopify.com-shipment_summary-2024.09/5138553937707/20260930T054244308099_a09c56f61518406e8f88ef471818fef1.json",
+ "diff": {"added": [], "removed": [], "changed": [{"path": "status", "before": "exception", "after": "delivered"}]}}
+```
+
+Sending the old `ifSeqNo` again:
+
+```json
+{"error": {"code": "DOCUMENT_CHANGED", "message": "Document '5138553937707' changed since you read it. Reload it and try again"}}
+```
+
+### POST /api/v1/clusters/{clusterId}/data/{index}/_doc
+
+Creates a document. `id` is optional (Elasticsearch picks one if left out); an existing id is refused (`DOCUMENT_EXISTS`). Returns 201.
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -X POST http://172.0.58.49/api/v1/clusters/elkm2-prod/data/shoppremiumoutlets.myshopify.com-shipment_summary-2024.09/_doc -d '{
+  "id": "manual-001",
+  "document": {"vendor": "2593", "status": "label_created", "order_info": {"order_number": "SP0286999001"}},
+  "reason": "Recreate order lost in import"
+}'
+```
+
+```json
+{"index": "shoppremiumoutlets.myshopify.com-shipment_summary-2024.09", "id": "manual-001", "applied": true,
+ "changeId": "ec66d7c983724dfb8116f92f176444c9", "seqNo": 14070, "primaryTerm": 2, "versionKey": "doc-versions/elkm2-prod/…/manual-001/…json"}
+```
+
+### DELETE /api/v1/clusters/{clusterId}/data/{index}/_doc/{id}
+
+Deletes a document. `confirm` must repeat the id and `reason` is required; `?dryRun=true` shows what would go. A copy is saved first.
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" -X DELETE "http://172.0.58.49/api/v1/clusters/elkm2-prod/data/shoppremiumoutlets.myshopify.com-shipment_summary-2024.09/_doc/manual-001?confirm=manual-001&reason=Test%20order"
+```
+
+```json
+{"index": "shoppremiumoutlets.myshopify.com-shipment_summary-2024.09", "id": "manual-001", "applied": true, "deleted": true,
+ "changeId": "d3e31fdbf4044fdf86b1d54296ecd19a", "versionKey": "doc-versions/elkm2-prod/…/manual-001/…json"}
+```
+
+### GET /api/v1/clusters/{clusterId}/data/{index}/_doc/{id}/_history
+
+The saved versions of a document, newest first: what it looked like **before** each edit, create, delete or restore made through the API.
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" http://172.0.58.49/api/v1/clusters/elkm2-prod/data/shoppremiumoutlets.myshopify.com-shipment_summary-2024.09/_doc/5138553937707/_history
+```
+
+```json
+{"index": "shoppremiumoutlets.myshopify.com-shipment_summary-2024.09", "id": "5138553937707", "items": [
+  {"key": "doc-versions/elkm2-prod/shoppremiumoutlets.myshopify.com-shipment_summary-2024.09/5138553937707/20260930T054244308099_a09c56f6….json",
+   "action": "UPDATE", "at": "2026-09-30T05:42:44.308Z", "by": "latish.madapada@fenixcommerce.com",
+   "reason": "Carrier confirmed delivery", "changedFields": ["status"], "changeId": "a09c56f6…",
+   "before": {"exists": true, "seqNo": 12501, "primaryTerm": 2, "source": {"vendor": "2593", "status": "exception", "…": "…"}}}]}
+```
+
+### POST /api/v1/clusters/{clusterId}/data/{index}/_doc/{id}/_restore
+
+Puts a document back to a saved version (`versionKey` from `_history`): overwrites it, recreates it if it was deleted, or deletes it if the version is "before it was created". The current state is saved first, so a restore can be undone too. `?dryRun=true` returns the `plan` and the diff.
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -X POST http://172.0.58.49/api/v1/clusters/elkm2-prod/data/shoppremiumoutlets.myshopify.com-shipment_summary-2024.09/_doc/5138553937707/_restore -d '{
+  "versionKey": "doc-versions/elkm2-prod/shoppremiumoutlets.myshopify.com-shipment_summary-2024.09/5138553937707/20260930T054244308099_a09c56f61518406e8f88ef471818fef1.json",
+  "reason": "Undo: delivery was not confirmed"
+}'
+```
+
+```json
+{"index": "shoppremiumoutlets.myshopify.com-shipment_summary-2024.09", "id": "5138553937707", "plan": "overwrite", "applied": true,
+ "diff": {"added": [], "removed": [], "changed": [{"path": "status", "before": "delivered", "after": "exception"}]},
+ "restoresTo": {"at": "2026-09-30T05:42:44.308Z", "by": "latish.madapada@fenixcommerce.com", "action": "UPDATE"}}
+```
+
+### POST /api/v1/clusters/{clusterId}/data/{index}/_bulk_update and …/_bulk_delete
+
+Changes or deletes **every document the search matches** (same `query`, `filters`, `timeRange` as `_search`), at most 10,000. `_bulk_update` takes `set` (dotted field → new value) and/or `remove` (list of dotted fields). `_bulk_update` needs `edit`, `_bulk_delete` needs `delete`, on every index involved.
+
+The dry run is mandatory:
+
+1. `?dryRun=true` returns the exact `count`, how many would change, up to 5 samples with their before/after, warnings (for example "no query: matches every document") and a `dryRunToken` valid for 15 minutes.
+2. The real call sends the **same** body plus `dryRunToken`, `expectedCount` (the count from step 1) and `reason`. It is refused if the body differs (`DRY_RUN_MISMATCH`), the token is missing or old (`DRY_RUN_REQUIRED`, `DRY_RUN_EXPIRED`), the count is wrong (`COUNT_MISMATCH`), or the matching documents changed in the meantime (`COUNT_CHANGED`).
+3. All matching documents are backed up to S3, then written one by one with their `_seq_no` check: a document edited by someone else after the dry run is left alone and counted in `conflicts`.
+
+```bash
+# 1) dry run
+curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -X POST "http://172.0.58.49/api/v1/clusters/elkm2-prod/data/shoppremiumoutlets.myshopify.com-shipment_summary-2024.09/_bulk_update?dryRun=true" -d '{
+  "query": "vendor:2121 AND carrier:USPS",
+  "filters": [{"field": "status", "op": "is", "value": "exception"}],
+  "set": {"status": "on_hold"}
+}'
+```
+
+```json
+{"op": "update", "index": "shoppremiumoutlets.myshopify.com-shipment_summary-2024.09", "dryRun": true,
+ "count": 76, "willChange": 76, "unchanged": 0, "skippedCount": 0, "skipped": [], "warnings": [],
+ "indices": ["shoppremiumoutlets.myshopify.com-shipment_summary-2024.09"],
+ "sample": [{"_index": "shoppremiumoutlets.myshopify.com-shipment_summary-2024.09", "_id": "5138593619816",
+   "diff": {"added": [], "removed": [], "changed": [{"path": "status", "before": "exception", "after": "on_hold"}]}}],
+ "dryRunToken": "eyJjaGFuZ2UiOjc2LCJjb3VudCI6NzYs….rYhqn1ostdjmIggltXEjxeD0PZ0dOR8MvMRnqcVIp-I", "expiresInSeconds": 900,
+ "confirm": "Send the same request with dryRunToken, expectedCount=76 and a reason"}
+```
+
+```bash
+# 2) the real change: same body + token, count and reason
+curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -X POST http://172.0.58.49/api/v1/clusters/elkm2-prod/data/shoppremiumoutlets.myshopify.com-shipment_summary-2024.09/_bulk_update -d '{
+  "query": "vendor:2121 AND carrier:USPS",
+  "filters": [{"field": "status", "op": "is", "value": "exception"}],
+  "set": {"status": "on_hold"},
+  "dryRunToken": "<dryRunToken from step 1>", "expectedCount": 76,
+  "reason": "Hold USPS exceptions for vendor 2121"
+}'
+```
+
+```json
+{"op": "update", "count": 76, "willChange": 76, "applied": true, "changeId": "92e23f68213244dfb10774c318fb3483",
+ "backupKey": "bulk-backups/elkm2-prod/20260930T054246781348_92e23f68213244dfb10774c318fb3483.json",
+ "succeeded": 76, "conflicts": 0, "failed": 0, "errors": []}
+```
+
+Without the dry run:
+
+```json
+{"error": {"code": "DRY_RUN_REQUIRED", "message": "Run this as a dry run first (dryRun=true) and send back its dryRunToken, expectedCount and a reason"}}
+```
+
+`_bulk_delete` is the same without `set` / `remove`; its samples show the documents that would be deleted.
+
+### GET /api/v1/clusters/{clusterId}/data/_changes
+
+Bulk changes on the cluster, newest first (only those on indices you can see).
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" http://172.0.58.49/api/v1/clusters/elkm2-prod/data/_changes
+```
+
+```json
+{"clusterId": "elkm2-prod", "items": [{"changeId": "92e23f68213244dfb10774c318fb3483", "op": "update",
+  "index": "shoppremiumoutlets.myshopify.com-shipment_summary-2024.09", "at": "2026-09-30T05:42:46.781Z",
+  "by": "latish.madapada@fenixcommerce.com", "reason": "Hold USPS exceptions for vendor 2121", "count": 76,
+  "fields": {"set": ["status"], "remove": []}, "status": "DONE",
+  "result": {"succeeded": 76, "conflicts": 0, "failed": 0, "errors": []},
+  "search": {"query": "vendor:2121 AND carrier:USPS", "filters": [{"field": "status", "op": "is", "value": "exception"}], "timeRange": null},
+  "restoredBy": null, "restoredAt": null, "restoreOf": null}]}
+```
+
+### POST /api/v1/clusters/{clusterId}/data/_changes/{changeId}/_restore
+
+Puts every document of a bulk change back exactly as it was before (deleted ones are recreated). Later edits to those documents are overwritten, after being backed up themselves. Same two steps: `?dryRun=true` returns `count` and a `dryRunToken`; then send `{"dryRunToken", "expectedCount", "reason"}`. Needs `edit` on every index involved.
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -X POST "http://172.0.58.49/api/v1/clusters/elkm2-prod/data/_changes/92e23f68213244dfb10774c318fb3483/_restore?dryRun=true" -d '{}'
+curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -X POST http://172.0.58.49/api/v1/clusters/elkm2-prod/data/_changes/92e23f68213244dfb10774c318fb3483/_restore \
+  -d '{"dryRunToken": "<from the dry run>", "expectedCount": 76, "reason": "Undo the hold"}'
+```
+
+```json
+{"applied": true, "changeId": "5d1f…", "restoreOf": "92e23f68213244dfb10774c318fb3483",
+ "backupKey": "bulk-backups/elkm2-prod/…_5d1f….json", "succeeded": 76, "conflicts": 0, "failed": 0, "errors": []}
+```
+
 ## Admin API
 
 Admins only (users with `admin: true`, or listed in `BOOTSTRAP_ADMINS`). Every change made here is written to the audit log.
@@ -619,8 +843,10 @@ Admins only (users with `admin: true`, or listed in `BOOTSTRAP_ADMINS`). Every c
 
 A cluster is registered in one of two ways, and both can be used together:
 
-- **Added here** (`POST /api/v1/admin/clusters`, or **Administration → Clusters** in the console). Saved in `data/clusters.managed.yaml` on the EC2 server (mode 600, readable only by the container), **never in S3**. Takes effect at once, no restart.
-- **Listed in `config/clusters.yaml`** on the server, with credentials in `.env`. These show `"source": "file"`, `"editable": false`, and can only be changed in the file (then `docker compose up -d`).
+- **Added here** (`POST /api/v1/admin/clusters`, or **Administration → Clusters** in the console). The connection details go to `data/clusters.managed.yaml` on the EC2 server; the password or API key goes to AWS Secrets Manager as `es-config-api/clusters/<id>`. Never in S3. Takes effect at once, no restart.
+- **Listed in `config/clusters.yaml`** on the server, with the password in the same kind of secret (store it with `python -m app.cli set-cluster-secret <id>`). These show `"source": "file"`, `"editable": false`, and can only be changed in the file (then `docker compose up -d`).
+
+Every cluster in the responses below also has `"credentials": {"store": "secrets-manager", "secretName": "es-config-api/clusters/<id>", "present": true}` (`present: false` = the secret is missing).
 
 Passwords and API keys are write-only: no endpoint returns them. Before saving, the API connects to the cluster with the new settings and refuses if it can't (`CLUSTER_TEST_FAILED`); add `?skipTest=true` to save a cluster that is down right now. Use the `config_api` service account (role `config_api_writer`, see `docs/es-lockdown.md`), not `elastic`.
 
@@ -631,8 +857,8 @@ Passwords and API keys are write-only: no endpoint returns them. Before saving, 
 | `id` | POST only | Lowercase letters, digits, `-` and `_`; used in URLs; can't be changed later |
 | `name`, `description` | no | `name` defaults to the id |
 | `hosts` | yes | One or more node URLs, `http://` or `https://`, e.g. `https://10.0.1.10:9200` |
-| `auth.type` | no | `basic` (default), `api_key` or `none` |
-| `auth.username`, `auth.password` | basic | On PUT, leave `password` out to keep the saved one (same username) |
+| `auth.type` | no | `basic` (default), `api_key` or `none` (no authentication, for clusters with security off) |
+| `auth.username`, `auth.password` | basic | **The password is optional**: without one (and none saved) the cluster is saved as `none`. On PUT, leave `password` out to keep the saved one (same username) |
 | `auth.apiKey` | api_key | Base64 `id:key` form. On PUT, leave out to keep the saved one |
 | `verifyCerts` | no | Default `true`. Turn off only for a trusted network with self-signed certs |
 | `caCertPem` | no | PEM CA certificate for HTTPS. On PUT: leave out to keep, `""` to remove |
@@ -650,12 +876,12 @@ curl -s -H "Authorization: Bearer $TOKEN" http://172.0.58.49/api/v1/admin/cluste
 ```json
 {"items": [
   {"id": "elkm2-prod", "name": "ELK M2 Production", "description": "", "tags": [],
-   "hosts": ["http://node4.elkm2.prod.int.fenixcommerce.com:9200"], "authType": "basic", "username": "config_api",
+   "hosts": ["http://node4.elkm2.prod.int.fenixcommerce.com:9200"], "authType": "basic", "username": "es_console_api",
    "verifyCerts": true, "hasCaCert": false, "requestTimeout": 30, "source": "file", "editable": false,
    "reachable": true, "version": "8.17.1", "clusterName": "alpha-elkm-cluster-1", "clusterUuid": "hmvz4z0AQP-69TruOsjhzA",
    "health": "green", "numberOfNodes": 3},
   {"id": "elkm2-staging", "name": "ELK M2 Staging", "description": "Staging logs cluster", "tags": ["staging"],
-   "hosts": ["http://node1.elkm2.stage.int.fenixcommerce.com:9200"], "authType": "basic", "username": "config_api",
+   "hosts": ["http://node1.elkm2.stage.int.fenixcommerce.com:9200"], "authType": "basic", "username": "es_console_api",
    "verifyCerts": true, "hasCaCert": false, "requestTimeout": 30, "source": "managed", "editable": true,
    "createdAt": "2026-09-29T11:43:23.690Z", "createdBy": "latish.madapada@fenixcommerce.com",
    "updatedAt": "2026-09-29T11:43:23.690Z", "updatedBy": "latish.madapada@fenixcommerce.com",
@@ -679,7 +905,7 @@ curl -s -H "Authorization: Bearer $TOKEN" "http://172.0.58.49/api/v1/admin/clust
 Tries connection settings without saving anything. Same body as POST (no `id` needed). To re-test a saved cluster without re-typing its password, add its `"id"`: a missing password or API key is then taken from the saved one.
 
 ```bash
-curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -X POST http://172.0.58.49/api/v1/admin/clusters/test -d '{"hosts": ["http://node1.elkm2.stage.int.fenixcommerce.com:9200"], "auth": {"type": "basic", "username": "config_api", "password": "…"}}'
+curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -X POST http://172.0.58.49/api/v1/admin/clusters/test -d '{"hosts": ["http://node1.elkm2.stage.int.fenixcommerce.com:9200"], "auth": {"type": "basic", "username": "es_console_api", "password": "…"}}'
 ```
 
 ```json
@@ -689,7 +915,7 @@ curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -X
 Wrong password:
 
 ```json
-{"reachable": false, "error": "Elasticsearch refused the API's credentials: unable to authenticate user [config_api] for REST request [/]", "errorCode": "ES_AUTH_FAILED"}
+{"reachable": false, "error": "Elasticsearch refused the API's credentials: unable to authenticate user [es_console_api] for REST request [/]", "errorCode": "ES_AUTH_FAILED"}
 ```
 
 ### POST /api/v1/admin/clusters
@@ -702,21 +928,21 @@ curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -X
   "name": "ELK M2 Staging",
   "description": "Staging logs cluster",
   "hosts": ["http://node1.elkm2.stage.int.fenixcommerce.com:9200"],
-  "auth": {"type": "basic", "username": "config_api", "password": "…"},
+  "auth": {"type": "basic", "username": "es_console_api", "password": "…"},
   "tags": ["staging"]
 }'
 ```
 
 ```json
 {"cluster": {"id": "elkm2-staging", "name": "ELK M2 Staging", "description": "Staging logs cluster", "tags": ["staging"],
-  "hosts": ["http://node1.elkm2.stage.int.fenixcommerce.com:9200"], "authType": "basic", "username": "config_api",
+  "hosts": ["http://node1.elkm2.stage.int.fenixcommerce.com:9200"], "authType": "basic", "username": "es_console_api",
   "verifyCerts": true, "hasCaCert": false, "requestTimeout": 30, "source": "managed", "editable": true,
   "createdAt": "2026-09-29T11:43:23.690Z", "createdBy": "latish.madapada@fenixcommerce.com",
   "updatedAt": "2026-09-29T11:43:23.690Z", "updatedBy": "latish.madapada@fenixcommerce.com"},
  "test": {"reachable": true, "version": "8.17.1", "clusterName": "elkm2-staging", "health": "green", "numberOfNodes": 1}}
 ```
 
-HTTPS with your own CA: add `"hosts": ["https://…:9200"]` and `"caCertPem": "-----BEGIN CERTIFICATE-----\nMIID…\n-----END CERTIFICATE-----\n"` (newlines as `\n`). With an API key: `"auth": {"type": "api_key", "apiKey": "VnVhQ2ZH…"}`.
+HTTPS with your own CA: add `"hosts": ["https://…:9200"]` and `"caCertPem": "-----BEGIN CERTIFICATE-----\nMIID…\n-----END CERTIFICATE-----\n"` (newlines as `\n`). With an API key: `"auth": {"type": "api_key", "apiKey": "VnVhQ2ZH…"}`. A cluster without security: `"auth": {"type": "none"}` (or `basic` with no password); its `credentials` show `{"store": "none"}`.
 
 If the cluster can't be reached, nothing is saved:
 
@@ -736,7 +962,7 @@ curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -X
   "name": "ELK M2 Staging",
   "description": "Staging logs cluster (2 nodes)",
   "hosts": ["http://node1.elkm2.stage.int.fenixcommerce.com:9200", "http://node2.elkm2.stage.int.fenixcommerce.com:9200"],
-  "auth": {"type": "basic", "username": "config_api"},
+  "auth": {"type": "basic", "username": "es_console_api"},
   "requestTimeout": 60,
   "tags": ["staging"]
 }'
@@ -829,11 +1055,25 @@ curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -X
 
 ### PUT /api/v1/admin/users/{username}/permissions
 
-Changes only the user's cluster access and keeps the admin flag. The body is the full new access map.
+Changes only the user's cluster access and keeps the admin flag. The body is the full new access map: per cluster (or `*`) either a level, or a default plus index rules.
 
 ```bash
 curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -X PUT http://172.0.58.49/api/v1/admin/users/priya@fenixcommerce.com/permissions -d '{"elkm2-prod": "view"}'
+
+# index level: view everything, edit the shipment indices, never see payments
+curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -X PUT http://172.0.58.49/api/v1/admin/users/priya@fenixcommerce.com/permissions -d '{
+  "elkm2-prod": {"default": "view", "indices": [
+    {"pattern": "shoppremiumoutlets*-shipment_summary-*", "level": "edit"},
+    {"pattern": "payments-*", "level": "none"}]}
+}'
+
+# only some indices, nothing else on the cluster (no templates, ILM, pipelines)
+curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -X PUT http://172.0.58.49/api/v1/admin/users/dev@fenixcommerce.com/permissions -d '{
+  "elkm2-prod": {"default": null, "indices": [{"pattern": "shoppremium*", "level": "edit"}, {"pattern": "delest-log-*", "level": "view"}]}
+}'
 ```
+
+Patterns use `*` and `?`, can't start with a dot and can't contain commas; at most 100 rules per cluster. The most specific match wins (an exact name beats a pattern; a longer literal part beats a shorter one). A cluster with no default and no rules is left out.
 
 ### DELETE /api/v1/admin/users/{username}
 
@@ -912,7 +1152,7 @@ curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -X
 
 ### GET /api/v1/admin/audit
 
-Returns the audit events for one UTC day, newest first. Filter by `clusterId`, `user` or `action` (`UPDATE`, `ROLLBACK`, `DRY_RUN`, `ADMIN_USER_UPDATE`, `ADMIN_PERMISSIONS_UPDATE`, `ADMIN_USER_DELETE`, `ADMIN_ALLOWLIST_UPDATE`, `ADMIN_ALLOWLIST_DELETE`, `ADMIN_USER_CREATE`, `ADMIN_PASSWORD_RESET`, `ADMIN_CLUSTER_CREATE`, `ADMIN_CLUSTER_UPDATE`, `ADMIN_CLUSTER_DELETE`, `INDEX_DELETE`, `DATA_SEARCH`, `DATA_DOCUMENT`, `DATA_EXPORT`, `AUTH_LOGIN`, `AUTH_LOGOUT`, `AUTH_LOGOUT_ALL`, `AUTH_PASSWORD_CHANGE`); `limit` defaults to 200.
+Returns the audit events for one UTC day, newest first. Filter by `clusterId`, `user` or `action` (`UPDATE`, `ROLLBACK`, `DRY_RUN`, `ADMIN_USER_UPDATE`, `ADMIN_PERMISSIONS_UPDATE`, `ADMIN_USER_DELETE`, `ADMIN_ALLOWLIST_UPDATE`, `ADMIN_ALLOWLIST_DELETE`, `ADMIN_USER_CREATE`, `ADMIN_PASSWORD_RESET`, `ADMIN_CLUSTER_CREATE`, `ADMIN_CLUSTER_UPDATE`, `ADMIN_CLUSTER_DELETE`, `INDEX_DELETE`, `DATA_SEARCH`, `DATA_DOCUMENT`, `DATA_EXPORT`, `DATA_DOC_CREATE`, `DATA_DOC_UPDATE`, `DATA_DOC_DELETE`, `DATA_DOC_RESTORE`, `DATA_BULK_UPDATE`, `DATA_BULK_DELETE`, `DATA_BULK_RESTORE`, `AUTH_LOGIN`, `AUTH_LOGOUT`, `AUTH_LOGOUT_ALL`, `AUTH_PASSWORD_CHANGE`); `limit` defaults to 200.
 
 ```bash
 curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' "http://172.0.58.49/api/v1/admin/audit?date=2026-09-29&clusterId=elkm2-prod&action=UPDATE"
@@ -948,9 +1188,11 @@ Every error has the same shape: an HTTP status, a stable `code`, a readable `mes
 | 400 | `INVALID_EMAIL` | New users are added by email address |
 | 400 | `WEAK_PASSWORD` | New password needs 12+ characters with letters and digits (or 20+ of anything), must not be your email and must differ from the current one |
 | 400 | `CANNOT_DELETE_SELF` | An admin can't delete their own user |
+| 400 | `DRY_RUN_REQUIRED`, `DRY_RUN_EXPIRED`, `DRY_RUN_MISMATCH`, `COUNT_MISMATCH` | Bulk change: run the dry run first and send its `dryRunToken` and `expectedCount` with the identical body, within 15 minutes |
+| 400 | `INVALID_FIELD`, `NOTHING_TO_CHANGE`, `DOCUMENT_TOO_LARGE` | Bulk update needs `set` and/or `remove` with real field paths (not `_id`…); documents over 5 MB can't be edited here |
 | 400 | `INVALID_FILTER` | Data search: a filter is missing its value (or both ends of a range) |
 | 400 | `RESULT_WINDOW_EXCEEDED` | Data search: `from + size` over 10,000; narrow the search or change the sort |
-| 400 | `INVALID_CLUSTER` | Cluster body is wrong: bad id, node URL, missing username/password/API key, or unreadable `caCertPem` |
+| 400 | `INVALID_CLUSTER` | Cluster body is wrong: bad id, node URL, a password without a username, a missing API key, or unreadable `caCertPem` |
 | 400 | `CONFIRMATION_MISMATCH` | Cluster remove: `confirm` must be the exact cluster id |
 | 401 | `NOT_AUTHENTICATED` | No token sent: sign in with `POST /api/v1/auth/login` and send `Authorization: Bearer $TOKEN` (in /docs: **Authorize**) |
 | 401 | `SESSION_EXPIRED` | Token expired (after 12 hours) or ended by a password change, reset or logout-all; sign in again |
@@ -961,8 +1203,12 @@ Every error has the same shape: an HTTP status, a stable `code`, a readable `mes
 | 403 | `ADMIN_REQUIRED` | Admin-only endpoint |
 | 403 | `SYSTEM_INDEX` | Data browser: names and patterns starting with `.` (system and hidden indices) can't be browsed |
 | 404 | `CLUSTER_NOT_FOUND`, `INDEX_NOT_FOUND`, `RESOURCE_NOT_FOUND`, `USER_NOT_FOUND` | Check the id or name |
+| 404 | `VERSION_NOT_FOUND`, `CHANGE_NOT_FOUND` | That saved version or bulk change doesn't exist (or belongs to another document) |
 | 404 | `DOCUMENT_NOT_FOUND` | Data browser: no document with that id in that index |
 | 404 | `NO_SNAPSHOT` | Nothing to roll back yet: no change has been made through the API |
+| 409 | `DOCUMENT_CHANGED` | The document was edited by someone else since you read it; reload it and try again |
+| 409 | `DOCUMENT_EXISTS` | A document with that id already exists; edit it instead |
+| 409 | `COUNT_CHANGED` | Documents matching the bulk change changed since the dry run; run it again |
 | 409 | `CLUSTER_EXISTS` | That cluster id is taken (by an added cluster or one in `clusters.yaml`) |
 | 409 | `CLUSTER_READ_ONLY` | The cluster is defined in `clusters.yaml`; change it in that file on the server |
 | 409 | `CLUSTER_MANAGEMENT_DISABLED` | `MANAGED_CLUSTERS_FILE` is empty, so clusters can only come from `clusters.yaml` |
@@ -977,11 +1223,16 @@ Every error has the same shape: an HTTP status, a stable `code`, a readable `mes
 | 422 | `ROLLBACK_NOT_SUPPORTED` | Mapping changes are permanent |
 | 422 | `NOT_A_CONCRETE_INDEX` | The name is an alias, a data stream, or matches several indices; use the real index name |
 | 422 | `DATA_STREAM_WRITE_INDEX` | Can't delete a data stream's current write index; roll it over first |
+| 422 | `TOO_MANY_DOCUMENTS` | A bulk change matched more than 10,000 documents; narrow the query or filters |
 | 422 | `CLUSTER_TEST_FAILED` | Add/edit cluster: the API couldn't connect with those settings; `details` says why. Fix them, or add `?skipTest=true` |
 | 423 | `ACCOUNT_LOCKED` | 5 wrong passwords in a row: wait 15 minutes (`details.retryAfterMinutes`) or ask an admin to reset the password |
+| 500 | `SECRETS_ACCESS_DENIED` | The EC2 role may not read or write the secret: add the Secrets Manager statement from `docs/iam-policy.json` |
 | 500 | `CLUSTERS_FILE_NOT_WRITABLE` | The container can't write `data/` on the server: run `sudo chown 10001:10001 data && chmod 700 data` in the project folder |
 | 502 | `CLUSTER_UNREACHABLE` | The API can't reach Elasticsearch (network or security group) |
 | 502 | `ES_AUTH_FAILED` | Wrong Elasticsearch username or password (in `.env`, or saved for an added cluster: fix it under **Administration → Clusters**) |
+| 502 | `ES_WRITE_NOT_ALLOWED` | The API's Elasticsearch account lacks the `write` index privilege; add it to `config_api_writer` (`docs/es-lockdown.md`) |
+| 502 | `CLUSTER_CREDENTIALS_MISSING` | No password / API key for the cluster: create `es-config-api/clusters/<id>` with `python -m app.cli set-cluster-secret <id>` |
+| 502 | `SECRETS_UNAVAILABLE` | AWS Secrets Manager couldn't be reached (network, VPC endpoint) |
 | 502 | `ES_READ_NOT_ALLOWED` | Data browser: the API's Elasticsearch account lacks the `read` index privilege; add it to `config_api_writer` (`docs/es-lockdown.md`) |
 | 502 | `ES_UNAVAILABLE` | Elasticsearch returned a 5xx or 429; retry, and check the cluster |
 

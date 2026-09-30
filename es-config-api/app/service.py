@@ -15,7 +15,21 @@ from typing import Any
 from .clusters import ClusterRegistry, es_call
 from .errors import ApiError, bad_request, conflict, forbidden, not_found, precondition_failed, unprocessable
 from .handlers import Handler, Plan, State, get_handler
-from .identity import User, require_cluster
+from .identity import (User, require_admin_user, require_any_access, require_cluster,
+                       require_index)
+
+INDEX_TYPES = ("index-settings", "index-mappings")
+
+
+def authorize(user: User, cluster_id: str, config_type: str, resource: str, needed: str) -> None:
+    """Cluster settings: admins only. Index settings/mappings: the user's level on that index.
+    Templates, ILM policies, pipelines: the user's cluster-wide level."""
+    if config_type == "cluster-settings":
+        require_admin_user(user)
+    elif config_type in INDEX_TYPES:
+        require_index(user, cluster_id, resource, needed)
+    else:
+        require_cluster(user, cluster_id, needed)
 from .repos import AllowlistRepo, AuditRepo, LockRepo, SnapshotRepo
 from .util import diff, diff_is_empty, iso, new_id
 
@@ -39,13 +53,18 @@ class ChangeService:
 
     # ------------------------------------------------------------------ reads
     def health(self, user: User, cluster_id: str) -> dict:
-        require_cluster(user, cluster_id, "view")
+        require_any_access(user, cluster_id)
         es = self.registry.client(cluster_id)
         h = es_call(es, "GET", "/_cluster/health")
         return {"clusterId": cluster_id, "status": h.get("status"),
                 "numberOfNodes": h.get("number_of_nodes"),
                 "unassignedShards": h.get("unassigned_shards"),
                 "clusterName": h.get("cluster_name")}
+
+    def nodes(self, user: User, cluster_id: str) -> dict:
+        from .nodes import node_stats
+        require_any_access(user, cluster_id)
+        return node_stats(self.registry.client(cluster_id), cluster_id)
 
     def list_resources(self, user: User, cluster_id: str, config_type: str) -> dict:
         require_cluster(user, cluster_id, "view")
@@ -54,17 +73,23 @@ class ChangeService:
         return {"clusterId": cluster_id, "configType": config_type, "items": handler.list(es)}
 
     def list_indices(self, user: User, cluster_id: str) -> dict:
-        require_cluster(user, cluster_id, "view")
+        """Indices the user may see (index rules applied), each with their level on it."""
+        require_any_access(user, cluster_id)
         es = self.registry.client(cluster_id)
         rows = es_call(es, "GET", "/_cat/indices",
                        params={"format": "json", "h": "index,health,status,docs.count",
                                "expand_wildcards": "open,closed"})
-        return {"clusterId": cluster_id,
-                "items": sorted((r for r in rows if not r["index"].startswith(".")),
-                                key=lambda r: r["index"])}
+        items = []
+        for r in rows:
+            if r["index"].startswith("."):
+                continue
+            level = user.index_level(cluster_id, r["index"])
+            if level:
+                items.append({**r, "permission": level})
+        return {"clusterId": cluster_id, "items": sorted(items, key=lambda r: r["index"])}
 
     def get(self, user: User, cluster_id: str, config_type: str, resource: str) -> dict:
-        require_cluster(user, cluster_id, "view")
+        authorize(user, cluster_id, config_type, resource, "view")
         handler = get_handler(config_type)
         handler.check_resource(resource)
         es = self.registry.client(cluster_id)
@@ -83,7 +108,7 @@ class ChangeService:
         }
 
     def previous(self, user: User, cluster_id: str, config_type: str, resource: str) -> dict:
-        require_cluster(user, cluster_id, "view")
+        authorize(user, cluster_id, config_type, resource, "view")
         handler = get_handler(config_type)
         handler.check_resource(resource)
         doc, _ = self.snapshots.get(cluster_id, config_type, resource)
@@ -126,7 +151,7 @@ class ChangeService:
             handler = get_handler(config_type)
             handler.check_resource(resource)
             self.registry.get(cluster_id)
-            require_cluster(user, cluster_id, "edit")
+            authorize(user, cluster_id, config_type, resource, "edit")
             if not dry_run and not (reason and reason.strip()):
                 raise bad_request("REASON_REQUIRED", "Give a 'reason' for the change (it is audited)")
             if action == "ROLLBACK" and not handler.rollback_supported:

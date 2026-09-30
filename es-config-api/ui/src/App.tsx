@@ -52,7 +52,7 @@ export function App() {
       <Route element={<RequireAuth><Shell /></RequireAuth>}>
         <Route index element={<Home />} />
         <Route path="c/:clusterId" element={<Overview />} />
-        <Route path="c/:clusterId/cluster-settings" element={<ClusterSettings />} />
+        <Route path="c/:clusterId/cluster-settings" element={<RequireAdmin><ClusterSettings /></RequireAdmin>} />
         <Route path="c/:clusterId/indices" element={<Indices />} />
         <Route path="c/:clusterId/data" element={<Data />} />
         <Route path="c/:clusterId/indices/:index" element={<IndexDetail />} />

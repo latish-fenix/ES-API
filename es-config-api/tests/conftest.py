@@ -18,6 +18,7 @@ from app.main import create_app
 from app.settings import Settings
 from app.storage import S3Store
 
+os.environ.setdefault("AWS_DEFAULT_REGION", "us-east-1")  # moto S3 + Secrets Manager
 ES_URL = os.environ.get("ES_TEST_URL", "http://127.0.0.1:9200")
 ES_USER = os.environ.get("ES_TEST_USER", "elastic")
 ES_PASSWORD = os.environ.get("ES_TEST_PASSWORD", "changeme123")

@@ -19,7 +19,7 @@ from typing import Any
 from .clusters import es_call
 from .errors import ApiError, bad_request, forbidden, not_found, unprocessable
 from .handlers.base import Handler
-from .identity import User, require_cluster
+from .identity import User, require_any_access, require_index
 from .util import iso, new_id
 
 CONFIG_TYPE = "index-delete"
@@ -92,7 +92,7 @@ class IndexDeleteService:
         try:
             _name_checker.check_resource(index)
             self.registry.get(cluster_id)
-            require_cluster(user, cluster_id, "delete")
+            require_index(user, cluster_id, index, "delete")
             blocked, source = self.allowlist.blocked(cluster_id, CONFIG_TYPE, [index])
             if blocked:
                 hint = (" (dot/system indices need a pattern that starts with '.')"
@@ -180,13 +180,13 @@ class IndexDeleteService:
                     pass
 
     def list_tombstones(self, user: User, cluster_id: str, index: str | None = None) -> dict:
-        require_cluster(user, cluster_id, "view")
+        require_any_access(user, cluster_id)
         self.registry.get(cluster_id)
         prefix = f"deleted-indices/{cluster_id}/" + (f"{index}/" if index else "")
         items = []
         for key in reversed(self.store.list_keys(prefix)):
             doc, _ = self.store.get_json(key)
-            if doc:
+            if doc and user.index_level(cluster_id, doc["index"]):
                 items.append({"index": doc["index"], "deletedAt": doc["deletedAt"],
                               "deletedBy": doc["deletedBy"], "reason": doc.get("reason"),
                               "docsCount": doc["summary"].get("docsCount"),

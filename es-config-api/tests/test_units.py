@@ -22,8 +22,11 @@ def test_clusters_validation(tmp_path):
     f.write_text("clusters:\n  - id: Bad Id\n    url: http://h\n")
     with pytest.raises(ValueError):
         load_clusters(str(f))
+    # no password in the file: it comes from Secrets Manager (<prefix>clusters/a)
     f.write_text("clusters:\n  - id: a\n    url: http://h\n    auth: {type: basic, username: u}\n")
-    with pytest.raises(ValueError, match="password"):
+    assert load_clusters(str(f))["a"].secret == "clusters/a"
+    f.write_text("clusters:\n  - id: a\n    url: http://h\n    auth: {type: basic}\n")
+    with pytest.raises(ValueError, match="username"):
         load_clusters(str(f))
 
 

@@ -1,14 +1,15 @@
 # Step 2: set up Python dependencies (first run only) and start the API on http://localhost:8080
 # Storage: local JSON files in local-test\.store by default. Run with -S3 to use S3 instead
-# (credentials from the AWS profile given by -AwsProfile, bucket/prefix from -Bucket / -Prefix).
+# (-Bucket is required; -AwsProfile picks an AWS profile, otherwise the default credentials).
 param(
     [switch]$S3,
-    [string]$Bucket = "fenix-ecr-logs",
-    [string]$Prefix = "cron-migration/",
-    [string]$AwsProfile = "fenix-prod",
-    [string]$Region = "us-west-2"
+    [string]$Bucket = "",
+    [string]$Prefix = "es-config-api-local/",
+    [string]$AwsProfile = "",
+    [string]$Region = "us-east-1"
 )
 . "$PSScriptRoot\common.ps1"
+if ($S3 -and -not $Bucket) { throw "Give the bucket: 2-start-api-s3.cmd -Bucket <your-bucket> [-Prefix es-config-api-local/] [-AwsProfile <profile>] [-Region us-east-1]" }
 
 if (-not (Test-EsUp)) { throw "Elasticsearch is not running - run local-test\1-start-elasticsearch.cmd first" }
 
@@ -56,12 +57,15 @@ $env:ES_LOCAL_PASSWORD = $SvcPassword
 $env:AUTH_MODE = "password"
 $env:BOOTSTRAP_ADMINS = $AdminUser
 $env:BOOTSTRAP_ADMIN_PASSWORD = $AdminPassword
-$env:SESSION_SECRET = -join ((1..48) | ForEach-Object { '{0:x}' -f (Get-Random -Maximum 16) })
+# Secrets (session key, password hashes, cluster passwords) go to files in local-test\.secrets
+# here; on EC2 they go to AWS Secrets Manager (SECRETS_BACKEND=aws).
+$env:SECRETS_BACKEND = "local"; $env:LOCAL_SECRETS_DIR = Join-Path $PSScriptRoot ".secrets"
 $env:PYTHONDONTWRITEBYTECODE = "1"
 if ($S3) {
     $env:STORAGE_BACKEND = "s3"; $env:S3_BUCKET = $Bucket; $env:S3_PREFIX = $Prefix
-    $env:AWS_PROFILE = $AwsProfile; $env:AWS_REGION = $Region
-    $where = "s3://$Bucket/$Prefix (profile $AwsProfile)"
+    if ($AwsProfile) { $env:AWS_PROFILE = $AwsProfile }
+    $env:AWS_REGION = $Region
+    $where = "s3://$Bucket/$Prefix" + $(if ($AwsProfile) { " (profile $AwsProfile)" } else { "" })
 } else {
     $env:STORAGE_BACKEND = "local"; $env:LOCAL_STORE_DIR = Join-Path $PSScriptRoot ".store"
     $where = $env:LOCAL_STORE_DIR
@@ -69,7 +73,7 @@ if ($S3) {
 
 Write-Step "Starting the API"
 Write-Host "    Storage : $where"
-Write-Host "    Admin   : $AdminUser  (first password: $AdminPassword)"
+Write-Host "    Admin   : $AdminUser  (first password: $AdminPassword - only until you change it)"
 Write-Host "    Console : http://localhost:$ApiPort/ui/    (sign in with the admin above)" -ForegroundColor White
 Write-Host "    API docs: http://localhost:$ApiPort/docs   (Ctrl+C here to stop)" -ForegroundColor White
 Set-Location $ProjectDir

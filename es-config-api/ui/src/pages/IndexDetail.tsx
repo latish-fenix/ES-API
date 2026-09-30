@@ -38,7 +38,7 @@ const SETTINGS_STARTER = '{\n  "index.refresh_interval": "30s"\n}';
 const MAPPING_STARTER = '{\n  "properties": {\n    "new_field": { "type": "keyword" }\n  }\n}';
 
 export function IndexDetail() {
-  const { clusterId, can, admin } = useCluster();
+  const { clusterId, canIndex, admin } = useCluster();
   const { index = "", part } = useParams();
   const navigate = useNavigate();
   const [deleting, setDeleting] = useState(false);
@@ -63,13 +63,13 @@ export function IndexDetail() {
             </div>
           )}
         </div>
-        {can("delete") && <button type="button" className="btn" style={{ color: "var(--danger)" }} onClick={() => setDeleting(true)}><Icon name="trash" /> Delete index</button>}
+        {canIndex(index, "delete") && <button type="button" className="btn" style={{ color: "var(--danger)" }} onClick={() => setDeleting(true)}><Icon name="trash" /> Delete index</button>}
       </div>
       <div className="tabs" role="tablist" aria-label="Index configuration" style={{ alignSelf: "flex-start" }}>
         <Link role="tab" className={`tab ${part === "settings" ? "active" : ""}`} aria-selected={part === "settings"} to={`${c}/indices/${enc(index)}/settings`}>Settings</Link>
         <Link role="tab" className={`tab ${part === "mapping" ? "active" : ""}`} aria-selected={part === "mapping"} to={`${c}/indices/${enc(index)}/mapping`}>Mapping</Link>
       </div>
-      {part === "settings" ? <SettingsTab key={index} clusterId={clusterId} index={index} canEdit={can("edit")} admin={admin} /> : <MappingTab key={index} clusterId={clusterId} index={index} canEdit={can("edit")} admin={admin} />}
+      {part === "settings" ? <SettingsTab key={index} clusterId={clusterId} index={index} canEdit={canIndex(index, "edit")} admin={admin} /> : <MappingTab key={index} clusterId={clusterId} index={index} canEdit={canIndex(index, "edit")} admin={admin} />}
       {deleting && <DeleteIndexDialog clusterId={clusterId} index={index} onClose={() => setDeleting(false)} onDeleted={() => navigate(`${c}/indices`)} />}
     </Page>
   );

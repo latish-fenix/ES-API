@@ -1,4 +1,5 @@
-"""Clusters added through the admin API: saved to a file on the server, never to S3."""
+"""Clusters added through the admin API: details in a file on the server, the password in
+Secrets Manager, nothing in S3."""
 from __future__ import annotations
 
 import os
@@ -46,7 +47,11 @@ def test_add_use_update_remove(mapp, es, prefix):
     assert "password" not in r.text and API_PASSWORD not in r.text
     assert stat.S_IMODE(os.stat(mapp["path"]).st_mode) == 0o600
     saved = yaml.safe_load(mapp["path"].read_text())["clusters"][0]
-    assert saved["auth"]["password"] == API_PASSWORD and saved["createdBy"] == "root"
+    assert "password" not in saved["auth"] and saved["auth"]["secret"] == "clusters/added"
+    assert API_PASSWORD not in mapp["path"].read_text() and saved["createdBy"] == "root"
+    assert _secret(mapp, "clusters/added") == {"password": API_PASSWORD}
+    assert body["cluster"]["credentials"] == {"store": "secrets-manager", "present": True,
+                                              "secretName": "es-config-api/clusters/added"}
     # nothing about clusters (let alone the password) went to S3
     keys = [o["Key"] for o in mapp["s3"].list_objects_v2(Bucket=BUCKET).get("Contents", [])]
     assert not any("cluster" in k and "state/" in k for k in keys)
@@ -72,7 +77,8 @@ def test_add_use_update_remove(mapp, es, prefix):
     assert r.status_code == 200, r.text
     assert r.json()["cluster"]["name"] == "Renamed"
     saved = yaml.safe_load(mapp["path"].read_text())["clusters"][0]
-    assert saved["auth"]["password"] == API_PASSWORD and saved["createdBy"] == "root"
+    assert "password" not in saved["auth"] and saved["createdBy"] == "root"
+    assert _secret(mapp, "clusters/added") == {"password": API_PASSWORD}
     os.utime(mapp["path"], ns=(os.stat(mapp["path"]).st_atime_ns, os.stat(mapp["path"]).st_mtime_ns + 10**9))
     other.refresh(force=True)
     assert other.get("added").name == "Renamed"
@@ -88,6 +94,7 @@ def test_add_use_update_remove(mapp, es, prefix):
     assert c.get("/api/v1/admin/users/ann", headers=ROOT).json()["clusters"] == {}
     assert c.get("/api/v1/clusters/added/health", headers=ROOT).status_code == 404
     assert yaml.safe_load(mapp["path"].read_text())["clusters"] == []
+    assert _secret(mapp, "clusters/added") is None  # the secret goes with the cluster
 
     acts = [e["action"] for e in c.get("/api/v1/admin/audit", params={"date": _today()},
                                        headers=ROOT).json()["items"]]
@@ -106,7 +113,6 @@ def test_refusals(mapp):
     assert r.json()["error"]["code"] == "CLUSTER_READ_ONLY"
     # validation
     for bad, code in [({"id": "Bad Id"}, "INVALID_CLUSTER"), ({"hosts": ["10.0.0.1:9200"]}, "INVALID_CLUSTER"),
-                      ({"auth": {"type": "basic", "username": "u"}}, "INVALID_CLUSTER"),
                       ({"caCertPem": "not a cert"}, "INVALID_CLUSTER")]:
         r = c.post("/api/v1/admin/clusters", json={**NEW, **bad}, headers=ROOT)
         assert r.status_code == 400 and r.json()["error"]["code"] == code, (bad, r.text)
@@ -125,6 +131,34 @@ def test_refusals(mapp):
     assert c.post("/api/v1/admin/clusters/test", json=NEW, headers=as_user("nobody")).status_code == 403
 
 
+def test_password_is_optional(mapp):
+    """A cluster without security needs no password: basic without one is saved as 'none'."""
+    c = TestClient(mapp["app"])
+    for body in ({**NEW, "id": "nopw", "auth": {"type": "basic", "username": "config_api"}},
+                 {**NEW, "id": "nopw2", "auth": {"type": "basic"}},
+                 {**NEW, "id": "nopw3", "auth": {"type": "none"}}):
+        # the test ES has security on, so the unauthenticated test fails (401) but is reported
+        t = c.post("/api/v1/admin/clusters/test", json=body, headers=ROOT)
+        assert t.status_code == 200 and t.json()["errorCode"] == "ES_AUTH_FAILED", t.text
+        r = c.post("/api/v1/admin/clusters", params={"skipTest": "true"}, json=body, headers=ROOT)
+        assert r.status_code == 201, r.text
+        cl = r.json()["cluster"]
+        assert cl["authType"] == "none" and cl["credentials"] == {"store": "none"}
+        assert _secret(mapp, f"clusters/{body['id']}") is None
+    saved = {i["id"]: i for i in yaml.safe_load(mapp["path"].read_text())["clusters"]}
+    assert saved["nopw"]["auth"] == {"type": "none"}
+    # editing a cluster with a saved password and leaving the password out keeps it
+    r = c.post("/api/v1/admin/clusters", json=NEW, headers=ROOT)
+    assert r.status_code == 201
+    upd = {k: v for k, v in NEW.items() if k != "id"}
+    r = c.put("/api/v1/admin/clusters/added", json={**upd, "auth": {"type": "basic", "username": API_USER}}, headers=ROOT)
+    assert r.status_code == 200 and r.json()["cluster"]["authType"] == "basic"
+    assert _secret(mapp, "clusters/added") == {"password": API_PASSWORD}
+    # a password without a username is refused
+    r = c.post("/api/v1/admin/clusters", json={**NEW, "id": "nouser", "auth": {"type": "basic", "password": "x"}}, headers=ROOT)
+    assert r.status_code == 400 and r.json()["error"]["code"] == "INVALID_CLUSTER"
+
+
 def test_management_can_be_switched_off(env):
     c = TestClient(env["app"])  # the default test app has no managed file
     r = c.post("/api/v1/admin/clusters", json=NEW, headers=ROOT)
@@ -133,6 +167,28 @@ def test_management_can_be_switched_off(env):
 
 def test_missing_clusters_yaml_is_ok(tmp_path):
     assert load_clusters(str(tmp_path / "nope.yaml")) == {}
+
+
+def _secret(mapp, name):
+    return mapp["app"].state.secrets.get(name)
+
+
+def test_inline_passwords_move_to_secrets_manager(env, tmp_path):
+    """A managed file from before Secrets Manager (password inline) is migrated at start."""
+    managed = tmp_path / "clusters.managed.yaml"
+    managed.write_text(yaml.safe_dump({"clusters": [{"id": "legacy", "url": ES_URL, "auth": {
+        "type": "basic", "username": API_USER, "password": API_PASSWORD}}]}))
+    s = env["app"].state.settings
+    settings = Settings(storage_backend="s3", s3_bucket=BUCKET, s3_prefix="t/", auth_mode="header",
+                        clusters_file=s.clusters_file, managed_clusters_file=str(managed),
+                        bootstrap_admins=["root"])
+    app = create_app(settings, store=S3Store(BUCKET, "t/", client=env["s3"]))
+    assert API_PASSWORD not in managed.read_text()
+    assert app.state.secrets.get("clusters/legacy") == {"password": API_PASSWORD}
+    # the clusters.yaml password (from ${TEST_ES_PASSWORD}) was copied into its secret too
+    assert app.state.secrets.get("clusters/test") == {"password": API_PASSWORD}
+    c = TestClient(app)
+    assert c.get("/api/v1/clusters/legacy/health", headers=ROOT).status_code == 200
 
 
 def _today() -> str:

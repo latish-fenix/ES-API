@@ -1,8 +1,11 @@
 """Cluster registry: clusters.yaml (read-only) + clusters added through the API, with one
 cached ES client per cluster.
 
-Credentials are never written in the YAML itself; reference environment
-variables instead, e.g. ``password: ${ES_PROD_US_PASSWORD}``.
+Passwords and API keys live in AWS Secrets Manager (``<prefix>clusters/<id>``, a JSON
+object ``{"password": ...}`` or ``{"apiKey": ...}``), never in either YAML file. A
+clusters.yaml entry without a password uses that secret (or the one named in
+``auth.secret``). ``${ENV}`` references still work for local development; at startup such
+a value is copied into Secrets Manager so it can be removed from .env.
 """
 from __future__ import annotations
 
@@ -89,6 +92,7 @@ class ClusterConfig:
     tags: list[str] = field(default_factory=list)
     source: str = "file"              # file = clusters.yaml, managed = added through the API
     meta: dict = field(default_factory=dict)  # createdAt/By, updatedAt/By (managed only)
+    secret: str | None = None         # secret holding the password / API key (relative name)
 
     def public(self) -> dict:
         return {"id": self.id, "name": self.name, "description": self.description,
@@ -116,6 +120,7 @@ def parse_cluster(item: dict, source: str) -> ClusterConfig:
     if not hosts:
         raise ValueError(f"cluster {cid!r} needs 'url' or 'hosts'")
     auth = item.get("auth") or {}
+    inline = auth.get("password") or auth.get("api_key")
     cfg = ClusterConfig(
         id=cid,
         name=str(item.get("name") or cid),
@@ -132,17 +137,18 @@ def parse_cluster(item: dict, source: str) -> ClusterConfig:
         tags=[str(t) for t in item.get("tags", [])],
         source=source,
         meta={k: item[k] for k in ("createdAt", "createdBy", "updatedAt", "updatedBy") if k in item},
+        secret=auth.get("secret") or (None if inline else f"clusters/{cid}"),
     )
     if cfg.auth_type not in ("basic", "api_key", "none"):
         raise ValueError(f"cluster {cid!r}: auth type must be basic, api_key or none")
-    if cfg.auth_type == "basic" and not (cfg.username and cfg.password):
-        raise ValueError(f"cluster {cid!r}: basic auth needs username and password")
-    if cfg.auth_type == "api_key" and not cfg.api_key:
-        raise ValueError(f"cluster {cid!r}: api_key auth needs api_key")
+    if cfg.auth_type == "basic" and not cfg.username:
+        raise ValueError(f"cluster {cid!r}: basic auth needs a username")
+    if cfg.auth_type == "none":
+        cfg.secret = None
     return cfg
 
 
-def load_clusters(path: str) -> dict[str, ClusterConfig]:
+def load_clusters(path: str, secrets=None) -> dict[str, ClusterConfig]:
     """clusters.yaml (with ${ENV} substitution). A missing file means no file clusters."""
     # Docker creates an empty directory when a bind-mounted file is missing: treat as none.
     if not os.path.isfile(path):
@@ -167,9 +173,9 @@ def load_clusters(path: str) -> dict[str, ClusterConfig]:
 class ManagedClustersFile:
     """Clusters added through the API, kept in a YAML file on the server (not in S3).
 
-    The file holds credentials, so it is written with mode 0600, atomically (temp file +
-    rename), under an exclusive lock so two API workers never interleave writes. Values
-    are stored literally (no ${ENV} substitution), in the same format as clusters.yaml.
+    Only connection details: the password / API key of each cluster is in Secrets Manager
+    (``auth.secret``). Written with mode 0600, atomically (temp file + rename), under an
+    exclusive lock so two API workers never interleave writes. Same format as clusters.yaml.
     """
 
     def __init__(self, path: str):
@@ -213,7 +219,7 @@ class ManagedClustersFile:
     def write(self, items: list[dict]) -> None:
         folder = os.path.dirname(self.path) or "."
         header = ("# Clusters added through the ES Config API (admin > Clusters).\n"
-                  "# Managed by the API: holds credentials, keep it private (mode 600).\n")
+                  "# Managed by the API. Passwords / API keys are in Secrets Manager (auth.secret).\n")
         body = yaml.safe_dump({"clusters": items}, sort_keys=False, allow_unicode=True)
         try:
             fd, tmp = tempfile.mkstemp(prefix=".clusters-", dir=folder)
@@ -231,15 +237,88 @@ class ClusterRegistry:
 
     RECHECK_SECONDS = 1.0
 
-    def __init__(self, clusters: dict[str, ClusterConfig], managed_file: str | None = None):
+    def __init__(self, clusters: dict[str, ClusterConfig], managed_file: str | None = None,
+                 secrets=None):
         self._file = dict(clusters)
         self.managed = ManagedClustersFile(managed_file) if managed_file else None
         self._managed: dict[str, ClusterConfig] = {}
         self._managed_mtime: float | None = None
         self._checked = 0.0
-        self._clients: dict[str, Elasticsearch] = {}
+        self._clients: dict[str, tuple[tuple, Elasticsearch]] = {}
         self._lock = threading.RLock()
+        self.secrets = None
         self.refresh(force=True)
+        if secrets is not None:
+            self.attach_secrets(secrets)
+
+    # -- secrets --------------------------------------------------------------
+    def attach_secrets(self, secrets) -> None:
+        """Use this secret store and move any password still in a file into it."""
+        self.secrets = secrets
+        self._migrate_secrets()
+
+    def _migrate_secrets(self) -> None:
+        # clusters.yaml: a password from ${ENV} is copied into the cluster's secret (once),
+        # so the env var can be deleted. The YAML itself is never rewritten.
+        for cfg in self._file.values():
+            value = _secret_value(cfg.password, cfg.api_key)
+            name = f"clusters/{cfg.id}"
+            if value and not self.secrets.get(name):
+                self.secrets.put(name, value, f"ES Config API: credentials for cluster {cfg.id}")
+                log.warning("Copied the credentials of cluster %s (clusters.yaml) into %s; remove "
+                            "the password line and its .env variable", cfg.id,
+                            self.secrets.full_name(name))
+        # managed file: inline credentials move to Secrets Manager and leave the file
+        if not self.managed or not self.managed.exists():
+            return
+        with self.managed.locked():
+            items, moved = self.managed.read(), []
+            for it in items:
+                auth = it.get("auth") or {}
+                value = _secret_value(auth.get("password"), auth.get("api_key"))
+                if value:
+                    name = auth.get("secret") or f"clusters/{it['id']}"
+                    self.secrets.put(name, value, f"ES Config API: credentials for cluster {it['id']}")
+                    auth.pop("password", None)
+                    auth.pop("api_key", None)
+                    auth["secret"] = name
+                    it["auth"] = auth
+                    moved.append(it["id"])
+            if moved:
+                self.managed.write(items)
+                log.warning("Moved the credentials of %s from %s into %s", ", ".join(moved), self.managed.path,
+                            "AWS Secrets Manager" if self.secrets.backend == "aws" else "the local secret store")
+        self.refresh(force=True)
+
+    def credentials(self, cfg: ClusterConfig) -> tuple[str | None, str | None]:
+        """(password, api key) for a cluster: inline (dev) or from its secret."""
+        if cfg.password or cfg.api_key or not cfg.secret:
+            return cfg.password, cfg.api_key
+        if self.secrets is None:
+            return None, None
+        doc = self.secrets.get(cfg.secret) or {}
+        return doc.get("password"), doc.get("apiKey")
+
+    def stored_secret(self, cluster_id: str) -> dict:
+        cfg = self.get(cluster_id)
+        if not cfg.secret or self.secrets is None:
+            return {}
+        return dict(self.secrets.get(cfg.secret) or {})
+
+    def view(self, cfg: ClusterConfig) -> dict:
+        """admin_view + where the credentials live (never the credentials)."""
+        out = cfg.admin_view()
+        if cfg.auth_type == "none":
+            out["credentials"] = {"store": "none"}
+        elif cfg.password or cfg.api_key:
+            out["credentials"] = {"store": "inline"}
+        else:
+            pw, key = self.credentials(cfg)
+            out["credentials"] = {
+                "store": "secrets-manager" if getattr(self.secrets, "backend", "") == "aws" else "local-secrets",
+                "secretName": self.secrets.full_name(cfg.secret) if self.secrets else cfg.secret,
+                "present": bool(pw or key)}
+        return out
 
     # -- reading --------------------------------------------------------------
     def refresh(self, force: bool = False) -> None:
@@ -265,9 +344,6 @@ class ClusterRegistry:
                               cfg.id, self.managed.path)
                     continue
                 loaded[cfg.id] = cfg
-            for cid in set(self._managed) | set(loaded):  # drop clients whose config changed
-                if self._managed.get(cid) != loaded.get(cid):
-                    self._clients.pop(cid, None)
             self._managed, self._managed_mtime = loaded, mtime
 
     def _all(self) -> dict[str, ClusterConfig]:
@@ -288,10 +364,18 @@ class ClusterRegistry:
 
     def client(self, cluster_id: str) -> Elasticsearch:
         cfg = self.get(cluster_id)
+        pw, key = self.credentials(cfg)
+        if cfg.auth_type == "basic" and not pw or cfg.auth_type == "api_key" and not key:
+            raise ApiError(502, "CLUSTER_CREDENTIALS_MISSING",
+                           f"No password or API key for cluster '{cluster_id}': create the secret "
+                           f"{self.secrets.full_name(cfg.secret) if self.secrets and cfg.secret else cfg.secret} "
+                           "in Secrets Manager (see README)")
+        fp = (repr(cfg), pw, key)
         with self._lock:
-            if cluster_id not in self._clients:
-                self._clients[cluster_id] = build_client(cfg)
-            return self._clients[cluster_id]
+            hit = self._clients.get(cluster_id)
+            if hit is None or hit[0] != fp:  # new cluster, changed config or rotated secret
+                self._clients[cluster_id] = (fp, build_client(cfg, pw, key))
+            return self._clients[cluster_id][1]
 
     # -- managed clusters -----------------------------------------------------
     def _require_managed(self) -> ManagedClustersFile:
@@ -301,9 +385,25 @@ class ClusterRegistry:
         return self.managed
 
     def save_managed(self, item: dict, *, create: bool) -> ClusterConfig:
-        """Create or replace one managed cluster entry (already validated)."""
+        """Create or replace one managed cluster entry (already validated). Its password /
+        API key goes to Secrets Manager; the file keeps only a reference to the secret."""
         mf = self._require_managed()
+        if self.secrets is None:
+            raise ApiError(500, "SECRETS_NOT_CONFIGURED", "No secret store is configured")
+        item = json_copy(item)
+        auth = item.get("auth") or {}
+        value = _secret_value(auth.pop("password", None), auth.pop("api_key", None))
+        name = f"clusters/{item['id']}"
+        if auth.get("type", "basic") != "none":
+            auth["secret"] = name
+        item["auth"] = auth
         cfg = parse_cluster(item, "managed")
+        if create and (cfg.id in self._file or any(it.get("id") == cfg.id for it in mf.read())):
+            raise ApiError(409, "CLUSTER_EXISTS", f"A cluster with id '{cfg.id}' already exists")
+        if value:
+            self.secrets.put(name, value, f"ES Config API: credentials for cluster {cfg.id}")
+        elif auth.get("type") == "none":
+            self.secrets.delete(name)
         with mf.locked():
             items = mf.read()
             idx = next((i for i, it in enumerate(items) if it.get("id") == cfg.id), None)
@@ -318,6 +418,18 @@ class ClusterRegistry:
             mf.write(items)
         self.refresh(force=True)
         return self.get(cfg.id)
+
+    def managed_item_with_secret(self, cluster_id: str) -> dict:
+        """The file entry with its saved password / API key filled in (server-side use only)."""
+        item = json_copy(self.managed_item(cluster_id))
+        auth = item.setdefault("auth", {})
+        doc = self.secrets.get(auth["secret"]) if self.secrets and auth.get("secret") else None
+        if doc:
+            if doc.get("password"):
+                auth["password"] = doc["password"]
+            if doc.get("apiKey"):
+                auth["api_key"] = doc["apiKey"]
+        return item
 
     def managed_item(self, cluster_id: str) -> dict:
         mf = self._require_managed()
@@ -334,6 +446,10 @@ class ClusterRegistry:
             if len(keep) == len(items):
                 raise self._not_managed(cluster_id)
             mf.write(keep)
+        if self.secrets is not None:
+            self.secrets.delete(f"clusters/{cluster_id}")
+        with self._lock:
+            self._clients.pop(cluster_id, None)
         self.refresh(force=True)
         return {"deleted": cluster_id}
 
@@ -345,7 +461,21 @@ class ClusterRegistry:
         return not_found("CLUSTER_NOT_FOUND", f"Unknown cluster '{cluster_id}'")
 
 
-def build_client(cfg: ClusterConfig) -> Elasticsearch:
+def _secret_value(password: str | None, api_key: str | None) -> dict | None:
+    if api_key:
+        return {"apiKey": api_key}
+    if password:
+        return {"password": password}
+    return None
+
+
+def json_copy(obj: Any) -> Any:
+    import json
+    return json.loads(json.dumps(obj))
+
+
+def build_client(cfg: ClusterConfig, password: str | None = None,
+                 api_key: str | None = None) -> Elasticsearch:
     kwargs: dict[str, Any] = dict(
         hosts=cfg.hosts, verify_certs=cfg.verify_certs,
         request_timeout=cfg.request_timeout, retry_on_timeout=True, max_retries=2,
@@ -358,17 +488,23 @@ def build_client(cfg: ClusterConfig) -> Elasticsearch:
     if not cfg.verify_certs:
         kwargs["ssl_show_warn"] = False
     if cfg.auth_type == "basic":
-        kwargs["basic_auth"] = (cfg.username, cfg.password)
+        kwargs["basic_auth"] = (cfg.username, password or cfg.password)
     elif cfg.auth_type == "api_key":
-        kwargs["api_key"] = cfg.api_key
+        kwargs["api_key"] = api_key or cfg.api_key
     return Elasticsearch(**kwargs)
 
 
+NDJSON_HEADERS = {
+    "accept": "application/vnd.elasticsearch+json; compatible-with=8",
+    "content-type": "application/vnd.elasticsearch+x-ndjson; compatible-with=8",
+}
+
+
 def es_call(es: Elasticsearch, method: str, path: str, body: Any = None,
-            params: dict | None = None) -> Any:
+            params: dict | None = None, headers: dict | None = None) -> Any:
     """Raw ES request. Raises ApiError with a clean code on failure."""
     try:
-        resp = es.perform_request(method, path, headers=ES_HEADERS, body=body, params=params)
+        resp = es.perform_request(method, path, headers=headers or ES_HEADERS, body=body, params=params)
         return resp.body
     except EsApiError as e:
         status = getattr(e.meta, "status", 500)

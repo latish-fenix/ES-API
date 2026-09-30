@@ -36,7 +36,7 @@ API_URL=http://172.0.58.49 npm run dev
 ```
 
 Sign in with an account that exists on that API (for the local test setup:
-`latish.madapada@fenixcommerce.com` / `Local-Test-Admin-2026`).
+`latish.madapada@fenixcommerce.com` with the first password printed by `local-test\2-start-api.cmd`).
 
 ## Scripts
 
@@ -90,6 +90,7 @@ ui/
 │       ├── Overview.tsx, ClusterSettings.tsx
 │       ├── Indices.tsx (+ delete dialog), IndexDetail.tsx (settings / mapping tabs)
 │       ├── Data.tsx             data browser: query, filters, time range, columns, sort, document view, export
+│       ├── DataEdit.tsx         document edit / create / delete / history + bulk update / delete dialogs
 │       ├── NamedResources.tsx   index/component templates, ILM policies, ingest pipelines
 │       └── admin/Clusters.tsx, admin/Users.tsx, admin/Allowlist.tsx, admin/Audit.tsx
 ```
@@ -101,10 +102,10 @@ ui/
 | `/login` | Sign in | everyone |
 | `/` | redirects to the last-used (or first) cluster | signed in |
 | `/c/:cluster` | Overview | view+ |
-| `/c/:cluster/cluster-settings` | Cluster settings | view+ (edit to change) |
+| `/c/:cluster/cluster-settings` | Cluster settings (listed under Administration) | admin |
 | `/c/:cluster/indices` (`?tab=deleted`) | Indices / deleted indices | view+ |
 | `/c/:cluster/indices/:index/settings` · `/mapping` | Index detail | view+ |
-| `/c/:cluster/data?index=&q=&f=&tf=&tg=&tl=&sort=&from=&size=&cols=` | Data browser (all search state in the URL, so a search can be bookmarked or shared) | view+ |
+| `/c/:cluster/data?index=&q=&f=&tf=&tg=&tl=&sort=&from=&size=&cols=` | Data browser (all search state in the URL, so a search can be bookmarked or shared); edits need edit on the document's index | view+ |
 | `/c/:cluster/{index-templates,component-templates,ilm-policies,ingest-pipelines}[/:name]` (`?new=1`) | Named resources | view+ |
 | `/account/password` | Change password | signed in |
 | `/admin/clusters` · `/admin/users` · `/admin/allowlist` · `/admin/audit` | Administration | admin |
@@ -136,11 +137,24 @@ or `["admin-users"]`. Writes are `useMutation`s that invalidate the affected key
 Client errors (4xx) are never retried; network errors and 5xx are retried twice. Cluster
 health refreshes every 60 s.
 
+**Permissions in the UI.** `/me` returns `access` per cluster (`{default, indices: [{pattern, level}]}`).
+`useCluster()` in `session.tsx` gives `level` (cluster default), `can(level)`, `canIndex(index, level)`
+(same most-specific-pattern rule as the API, via `glob.ts`) and `hasAccess`. The UI only uses
+them to hide buttons; the API enforces everything.
+
 The data browser (`pages/Data.tsx`) keeps its search in the URL and runs it with TanStack Query
 (`["data-search", cluster, index, body]`, previous page kept while the next loads). Chosen
 columns are remembered per cluster + index in `localStorage` (wrapped in try/catch); the
 default is the first document's top-level fields. Export uses `downloadPost` in `api.ts`
 (a fetch that returns a Blob) because the response is a file, not JSON.
+
+Document writes (`pages/DataEdit.tsx`) always preview first: `PUT …/_doc/{id}?dryRun=true` for
+the diff, then the real call with `ifSeqNo`/`ifPrimaryTerm` from the search hit. Bulk dialogs
+keep the dry run's `dryRunToken` and send it back with `expectedCount` (which the user types).
+On success they invalidate `data-search`, `data-fields`, `indices`, `doc-history` and
+`bulk-changes`.
+
+The Overview's node table polls `GET /clusters/{id}/nodes` every 30 s (`["nodes", cluster]`).
 
 Adding, editing or removing a cluster (`pages/admin/Clusters.tsx`) invalidates
 `admin-clusters`, `clusters`, `me` and `admin-users`, so the cluster switcher and the Users
@@ -212,9 +226,9 @@ code goes in the small print, not the headline).
 - `npm run build` must pass (it type-checks).
 - Backend tests cover how the UI is served: `pytest -q tests/test_auth.py -k "security_headers or auth_config"` checks the
   SPA fallback, cache headers and security headers.
-- Manual end-to-end check: the 19-step tour in `local-test/TESTING.md` §1a (about 10 minutes)
+- Manual end-to-end check: the 23-step tour in `local-test/TESTING.md` §1a (about 10 minutes)
   covers sign-in, dry run/apply/rollback, mappings, ILM, pipelines, users + CSV, allowlist,
-  audit, delete, adding / editing / removing a cluster, and the data browser.
+  audit, delete, adding / editing / removing a cluster, the data browser, document edits with undo, bulk changes, index rules and node stats.
 - The UI was verified end to end with Playwright (Chromium) against Elasticsearch 8.17.1,
   including a view-only user, dark mode, 1280 px and phone widths. Those scripts are not in
   the repo yet.

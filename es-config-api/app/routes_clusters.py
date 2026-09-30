@@ -3,9 +3,10 @@
 Clusters come from two places:
 * ``clusters.yaml`` (CLUSTERS_FILE): edited on the server; read-only here.
 * the managed clusters file (MANAGED_CLUSTERS_FILE, default /app/data/clusters.managed.yaml):
-  clusters added through this API or the web console. It lives on the server's disk, never in
-  S3, and holds the Elasticsearch credentials, so it is written with mode 0600. Passwords and
-  API keys are write-only: no endpoint ever returns them.
+  clusters added through this API or the web console. It lives on the server's disk and
+  holds connection details only; each cluster's password / API key is stored in AWS Secrets
+  Manager (``<prefix>clusters/<id>``). Passwords and API keys are write-only: no endpoint
+  ever returns them.
 """
 from __future__ import annotations
 
@@ -28,10 +29,14 @@ PING_TIMEOUT = 8
 
 
 class AuthBody(BaseModel):
-    type: Literal["basic", "api_key", "none"] = "basic"
+    type: Literal["basic", "api_key", "none"] = Field(
+        "basic", description="basic = username and password; api_key; none = no authentication "
+                             "(security off). basic without a password is saved as none")
     username: str | None = Field(None, max_length=256)
     password: str | None = Field(None, max_length=1024,
-                                 description="Write-only. On update, leave out to keep the stored one")
+                                 description="Write-only and optional. On update, leave out to keep "
+                                             "the stored one; with none stored, the cluster is saved "
+                                             "without authentication")
     apiKey: str | None = Field(None, max_length=2048,
                                description="Write-only (base64 'id:key' form). On update, leave out to keep")
 
@@ -52,7 +57,7 @@ class ClusterFields(BaseModel):
     model_config = {"json_schema_extra": {"examples": [{
         "name": "ELK M2 Staging", "description": "Staging logs cluster",
         "hosts": ["https://10.0.2.10:9200"],
-        "auth": {"type": "basic", "username": "config_api", "password": "…"},
+        "auth": {"type": "basic", "username": "es_console_api", "password": "…"},
         "verifyCerts": True, "caCertPem": "-----BEGIN CERTIFICATE-----\n…",
         "requestTimeout": 30, "tags": ["staging"]}]}}
 
@@ -112,13 +117,17 @@ def _item(cid: str, body: ClusterFields, stored: dict | None, admin: User) -> di
     a = body.auth
     auth: dict = {"type": a.type}
     if a.type == "basic":
-        if not (a.username or "").strip():
-            raise bad_request("INVALID_CLUSTER", "Basic auth needs a username")
-        auth["username"] = a.username.strip()
-        keep = old_auth.get("type") == "basic" and old_auth.get("username") == auth["username"]
-        auth["password"] = a.password if a.password else (old_auth.get("password") if keep else None)
-        if not auth["password"]:
-            raise bad_request("INVALID_CLUSTER", "Basic auth needs a password")
+        keep = old_auth.get("type") == "basic" and old_auth.get("username") == (a.username or "").strip()
+        password = a.password if a.password else (old_auth.get("password") if keep else None)
+        if not password:
+            # The password is optional: a cluster without security needs none, so it is saved
+            # (and connected to) without authentication.
+            auth = {"type": "none"}
+        else:
+            if not (a.username or "").strip():
+                raise bad_request("INVALID_CLUSTER", "A password needs a username")
+            auth["username"] = a.username.strip()
+            auth["password"] = password
     elif a.type == "api_key":
         auth["api_key"] = a.apiKey if a.apiKey else (
             old_auth.get("api_key") if old_auth.get("type") == "api_key" else None)
@@ -146,9 +155,13 @@ def _item(cid: str, body: ClusterFields, stored: dict | None, admin: User) -> di
     return item
 
 
-def test_connection(cfg: ClusterConfig) -> dict:
+def test_connection(cfg: ClusterConfig, password: str | None = None, api_key: str | None = None) -> dict:
     """Connect with these settings (a throwaway client) and report what we found."""
-    es = build_client(cfg).options(request_timeout=min(cfg.request_timeout, PING_TIMEOUT), max_retries=0)
+    if cfg.auth_type == "basic" and not (password or cfg.password) or \
+            cfg.auth_type == "api_key" and not (api_key or cfg.api_key):
+        return {"reachable": False, "errorCode": "CLUSTER_CREDENTIALS_MISSING",
+                "error": "No password or API key saved for this cluster"}
+    es = build_client(cfg, password, api_key).options(request_timeout=min(cfg.request_timeout, PING_TIMEOUT), max_retries=0)
     out: dict = {"reachable": False}
     try:
         info = es_call(es, "GET", "/")
@@ -173,10 +186,15 @@ def test_connection(cfg: ClusterConfig) -> dict:
     return out
 
 
-def _view(cfg: ClusterConfig, ping: bool) -> dict:
-    item = cfg.admin_view()
+def _view(reg, cfg: ClusterConfig, ping: bool) -> dict:
+    item = reg.view(cfg)
     if ping:
-        item.update(test_connection(cfg))
+        try:
+            pw, key = reg.credentials(cfg)
+        except ApiError as e:
+            item.update(reachable=False, error=e.message, errorCode=e.code)
+            return item
+        item.update(test_connection(cfg, pw, key))
     return item
 
 
@@ -188,29 +206,30 @@ def list_clusters(request: Request, check: bool = Query(True, description="Ping 
     clusters = sorted(reg.all(), key=lambda c: c.id)
     if check and clusters:
         with ThreadPoolExecutor(max_workers=min(8, len(clusters))) as pool:
-            items = list(pool.map(lambda c: _view(c, True), clusters))
+            items = list(pool.map(lambda c: _view(reg, c, True), clusters))
     else:
-        items = [_view(c, False) for c in clusters]
+        items = [_view(reg, c, False) for c in clusters]
     return {"items": items, "managedFile": reg.managed.path if reg.managed else None}
 
 
 @router.get("/{cluster_id}", summary="One cluster (secrets never returned)")
 def get_cluster(cluster_id: str, request: Request, check: bool = Query(False),
                 admin: User = Depends(require_admin)):
-    return _view(_registry(request).get(cluster_id), check)
+    reg = _registry(request)
+    return _view(reg, reg.get(cluster_id), check)
 
 
 @router.post("/test", summary="Test connection settings without saving anything")
 def test_cluster(body: TestBody, request: Request, admin: User = Depends(require_admin)):
     reg = _registry(request)
     stored = None
-    if body.id and reg.managed:
-        stored = next((it for it in reg.managed.read() if it.get("id") == body.id), None)
+    if body.id and reg.managed and any(it.get("id") == body.id for it in reg.managed.read()):
+        stored = reg.managed_item_with_secret(body.id)
     item = _item(body.id or "connection-test", body, stored, admin)
     return test_connection(parse_cluster(item, "managed"))
 
 
-@router.post("", status_code=201, summary="Add a cluster (saved on the server, not in S3)")
+@router.post("", status_code=201, summary="Add a cluster (details on the server, password in Secrets Manager)")
 def create_cluster(body: NewCluster, request: Request,
                    skipTest: bool = Query(False, description="Save even if the connection test fails"),
                    admin: User = Depends(require_admin)):
@@ -225,17 +244,17 @@ def create_cluster(body: NewCluster, request: Request,
                             f"Could not connect: {test.get('error')}. Fix the settings, or save "
                             "anyway with skipTest=true", test)
     cfg = reg.save_managed(item, create=True)
-    _audit(request, admin, "ADMIN_CLUSTER_CREATE", clusterId=cid, after=cfg.admin_view(),
+    _audit(request, admin, "ADMIN_CLUSTER_CREATE", clusterId=cid, after=reg.view(cfg),
            connectionTest={k: test.get(k) for k in ("reachable", "version", "error")})
-    return {"cluster": cfg.admin_view(), "test": test}
+    return {"cluster": reg.view(cfg), "test": test}
 
 
 @router.put("/{cluster_id}", summary="Change a cluster added here (clusters.yaml ones are read-only)")
 def update_cluster(cluster_id: str, body: ClusterFields, request: Request,
                    skipTest: bool = Query(False), admin: User = Depends(require_admin)):
     reg = _registry(request)
-    stored = reg.managed_item(cluster_id)
-    before = reg.get(cluster_id).admin_view()
+    stored = reg.managed_item_with_secret(cluster_id)
+    before = reg.view(reg.get(cluster_id))
     item = _item(cluster_id, body, stored, admin)
     test = test_connection(parse_cluster(item, "managed"))
     if not test["reachable"] and not skipTest:
@@ -243,11 +262,12 @@ def update_cluster(cluster_id: str, body: ClusterFields, request: Request,
                             f"Could not connect: {test.get('error')}. Nothing was changed. Fix the "
                             "settings, or save anyway with skipTest=true", test)
     cfg = reg.save_managed(item, create=False)
-    old_auth, new_auth = stored.get("auth") or {}, item["auth"]
+    pick = lambda a: {k: a.get(k) for k in ("type", "username", "password", "api_key")}  # noqa: E731
+    old_auth, new_auth = pick(stored.get("auth") or {}), pick(item["auth"])
     _audit(request, admin, "ADMIN_CLUSTER_UPDATE", clusterId=cluster_id, before=before,
-           after=cfg.admin_view(), credentialsChanged=old_auth != new_auth,
+           after=reg.view(cfg), credentialsChanged=old_auth != new_auth,
            caCertChanged=stored.get("ca_cert_pem") != item.get("ca_cert_pem"))
-    return {"cluster": cfg.admin_view(), "test": test}
+    return {"cluster": reg.view(cfg), "test": test}
 
 
 @router.delete("/{cluster_id}", summary="Remove a cluster added here")
@@ -259,7 +279,7 @@ def delete_cluster(cluster_id: str, request: Request,
     if confirm != cluster_id:
         raise bad_request("CONFIRMATION_MISMATCH", "Set 'confirm' to the cluster id to remove it",
                           {"expected": cluster_id, "got": confirm})
-    before = reg.get(cluster_id).admin_view()
+    before = reg.view(reg.get(cluster_id))
     reg.delete_managed(cluster_id)
     users = request.app.state.users.drop_cluster(cluster_id, admin.username)
     request.app.state.allowlist.delete(cluster_id)

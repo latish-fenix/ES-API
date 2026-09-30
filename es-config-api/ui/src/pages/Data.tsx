@@ -9,6 +9,7 @@ import { Icon } from "../components/icons";
 import { Page, useClusterCrumbs } from "../components/Shell";
 import { Badge, Callout, Dialog, Empty, ErrorCallout, Loading, Spinner, copyText, useToast } from "../components/ui";
 import { num } from "../format";
+import { BulkDialog, ChangesDialog, DeleteDoc, DocHistory, EditDoc, NewDocDialog } from "./DataEdit";
 import { useCluster, useHealth } from "../session";
 
 // ------------------------------------------------------------------ helpers
@@ -125,7 +126,7 @@ function toLocalInput(v: string | undefined): string {
 // ------------------------------------------------------------------ page
 
 export function Data() {
-  const { clusterId, admin } = useCluster();
+  const { clusterId, admin, canIndex } = useCluster();
   const health = useHealth(clusterId).data;
   const [params, setParams] = useSearchParams();
   const toast = useToast();
@@ -160,6 +161,10 @@ export function Data() {
   const [colsOpen, setColsOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   const [docAt, setDocAt] = useState<number | null>(null);
+  const [newDoc, setNewDoc] = useState(false);
+  const [bulk, setBulk] = useState<"update" | "delete" | null>(null);
+  const [bulkMenu, setBulkMenu] = useState(false);
+  const [changes, setChanges] = useState(false);
 
   const indices = useQuery({
     queryKey: ["indices", clusterId],
@@ -243,6 +248,16 @@ export function Data() {
   };
 
   const total = res?.total ?? 0;
+  const editable = fields.data?.editableIndices ?? [];
+  const allIdx = fields.data?.indices ?? [];
+  const fullScope = !!fields.data && !fields.data.hiddenIndices && allIdx.length > 0;
+  const canBulkUpdate = fullScope && allIdx.every((i) => canIndex(i, "edit"));
+  const canBulkDelete = fullScope && allIdx.every((i) => canIndex(i, "delete"));
+  const describe = [
+    `index ${index}`, q ? `query ${q}` : "no query",
+    ...filters.map(filterText),
+    timeField && (tg || tl) ? `${timeField} from ${tg || "…"} to ${tl || "…"}` : "",
+  ].filter(Boolean).join(" · ");
   const maxWin = res?.maxWindow ?? 10_000;
   const pageable = Math.min(total, maxWin);
   const lastFrom = Math.max(0, Math.floor((pageable - 1) / size) * size);
@@ -256,7 +271,7 @@ export function Data() {
       <div className="page-head">
         <div className="grow">
           <h1>Data</h1>
-          <p className="sub">Search and read documents. Read-only; system (dot) indices can't be opened. Searches and exports are recorded in the audit log (the query, never the documents).</p>
+          <p className="sub">Search, read and export documents; with edit access, change them too (every change needs a reason and can be undone). System (dot) indices can't be opened. Searches, exports and changes are audited: the query and field names, never the documents.</p>
         </div>
       </div>
 
@@ -323,8 +338,21 @@ export function Data() {
               {res?.timedOut && <Badge tone="amber">Timed out: partial results</Badge>}
             </div>
             <div className="grow" />
+            {editable.length > 0 && <button type="button" className="btn btn-sm" onClick={() => setNewDoc(true)}><Icon name="plus" size={15} /> New document</button>}
             <button type="button" className="btn btn-sm" onClick={() => setColsOpen(true)} disabled={!fields.data}><Icon name="columns" size={15} /> Columns · {columns.length}</button>
             <button type="button" className="btn btn-sm" onClick={() => setExportOpen(true)} disabled={!res || total === 0}><Icon name="download" size={15} /> Export</button>
+            {canBulkUpdate || canBulkDelete ? (
+              <div className="menu-wrap">
+                <button type="button" className="btn btn-sm" aria-haspopup="menu" aria-expanded={bulkMenu} onClick={() => setBulkMenu(!bulkMenu)}>Bulk <Icon name="caret" size={14} /></button>
+                {bulkMenu && (
+                  <div className="menu" role="menu" onMouseLeave={() => setBulkMenu(false)}>
+                    <button type="button" role="menuitem" disabled={!canBulkUpdate || !total} onClick={() => { setBulk("update"); setBulkMenu(false); }}>Update matching documents…</button>
+                    <button type="button" role="menuitem" className="danger" disabled={!canBulkDelete || !total} onClick={() => { setBulk("delete"); setBulkMenu(false); }}>Delete matching documents…</button>
+                    <button type="button" role="menuitem" onClick={() => { setChanges(true); setBulkMenu(false); }}>Bulk changes and undo…</button>
+                  </div>
+                )}
+              </div>
+            ) : null}
           </div>
 
           {search.error ? (
@@ -429,8 +457,13 @@ export function Data() {
             setExportOpen(false);
           }} />
       )}
+      {newDoc && (
+        <NewDocDialog clusterId={clusterId} indices={editable} initialIndex={index} sample={sample} onClose={() => setNewDoc(false)} />
+      )}
+      {bulk && <BulkDialog op={bulk} clusterId={clusterId} index={index} search={body} describe={describe} onClose={() => setBulk(null)} />}
+      {changes && <ChangesDialog clusterId={clusterId} onClose={() => setChanges(false)} />}
       {docAt !== null && hits[docAt] && (
-        <DocDialog hit={hits[docAt]} fieldMap={fieldMap} position={`${from + docAt + 1} of ${num(total)}`}
+        <DocDialog clusterId={clusterId} hit={hits[docAt]} fieldMap={fieldMap} position={`${from + docAt + 1} of ${num(total)}`}
           onPrev={docAt > 0 ? () => setDocAt(docAt - 1) : undefined}
           onNext={docAt < hits.length - 1 ? () => setDocAt(docAt + 1) : undefined}
           onClose={() => setDocAt(null)}
@@ -686,7 +719,8 @@ function ExportDialog({ total, columns, run, onClose }: {
 
 // ------------------------------------------------------------------ document dialog
 
-function DocDialog({ hit, fieldMap, position, onPrev, onNext, onClose, onFilter }: {
+function DocDialog({ clusterId, hit, fieldMap, position, onPrev, onNext, onClose, onFilter }: {
+  clusterId: string;
   hit: DataHit;
   fieldMap: Map<string, DataField>;
   position: string;
@@ -696,26 +730,41 @@ function DocDialog({ hit, fieldMap, position, onPrev, onNext, onClose, onFilter 
   onFilter: (f: DataFilter) => void;
 }) {
   const toast = useToast();
-  const [tab, setTab] = useState<"table" | "json">("table");
+  const [tab, setTab] = useState<"table" | "json" | "history">("table");
+  const [mode, setMode] = useState<"view" | "edit" | "delete">("view");
+  useEffect(() => setMode("view"), [hit._index, hit._id]);
+  const canEdit = (hit._permission === "edit" || hit._permission === "delete") && !hit._dataStream;
   const [filter, setFilter] = useState("");
   const json = useMemo(() => JSON.stringify(hit._source, null, 2), [hit]);
   const rows = useMemo(() => leafEntries(hit._source).filter(([k]) => !filter || k.toLowerCase().includes(filter.toLowerCase())), [hit, filter]);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.target as HTMLElement)?.tagName === "INPUT") return;
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || (e.target as HTMLElement)?.closest?.(".cm-editor") || mode !== "view") return;
       if (e.key === "ArrowLeft" && onPrev) onPrev();
       if (e.key === "ArrowRight" && onNext) onNext();
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [onPrev, onNext]);
+  }, [onPrev, onNext, mode]);
+  if (mode !== "view") {
+    return (
+      <Dialog wide title={<>{mode === "edit" ? "Edit" : "Delete"} <span className="mono">{hit._id}</span></>} subtitle={<span className="mono">{hit._index}</span>} onClose={onClose}>
+        {mode === "edit"
+          ? <EditDoc clusterId={clusterId} hit={hit} onDone={onClose} onCancel={() => setMode("view")} />
+          : <DeleteDoc clusterId={clusterId} hit={hit} onDone={onClose} onCancel={() => setMode("view")} />}
+      </Dialog>
+    );
+  }
   return (
-    <Dialog wide title={<span className="mono">{hit._id}</span>} subtitle={<><span className="mono">{hit._index}</span> · document {position}</>} onClose={onClose}
+    <Dialog wide title={<span className="mono">{hit._id}</span>} subtitle={<><span className="mono">{hit._index}</span> · document {position}{hit._dataStream ? <> · data stream <span className="mono">{hit._dataStream}</span> (read-only here)</> : null}</>} onClose={onClose}
       footer={<>
         <button type="button" className="btn btn-ghost" onClick={onPrev} disabled={!onPrev}><Icon name="chevronLeft" /> Previous</button>
         <button type="button" className="btn btn-ghost" onClick={onNext} disabled={!onNext}>Next <Icon name="chevron" /></button>
         <div className="grow" />
+        {canEdit && <button type="button" className="btn btn-ghost danger" onClick={() => setMode("delete")}><Icon name="trash" /> Delete</button>}
         <button type="button" className="btn" onClick={() => copyText(json).then(() => toast("Copied the document JSON"))}><Icon name="copy" /> Copy JSON</button>
+        {canEdit && <button type="button" className="btn" onClick={() => setMode("edit")}><Icon name="sliders" /> Edit</button>}
         <button type="button" className="btn btn-primary" onClick={onClose}>Close</button>
       </>}>
       <div className="stack">
@@ -723,11 +772,14 @@ function DocDialog({ hit, fieldMap, position, onPrev, onNext, onClose, onFilter 
           <div className="tabs" role="tablist" aria-label="Document view">
             <button type="button" role="tab" className="tab" aria-selected={tab === "table"} onClick={() => setTab("table")}>Fields</button>
             <button type="button" role="tab" className="tab" aria-selected={tab === "json"} onClick={() => setTab("json")}>JSON</button>
+            <button type="button" role="tab" className="tab" aria-selected={tab === "history"} onClick={() => setTab("history")}>History</button>
           </div>
           <div className="grow" />
           {tab === "table" && <input className="input" aria-label="Filter fields" placeholder="Filter fields" style={{ maxWidth: 240, minHeight: 34 }} value={filter} onChange={(e) => setFilter(e.target.value)} />}
         </div>
-        {tab === "json" ? (
+        {tab === "history" ? (
+          <DocHistory clusterId={clusterId} hit={hit} canEdit={canEdit} onRestored={onClose} />
+        ) : tab === "json" ? (
           <pre className="code-block" style={{ maxHeight: "60vh", whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{json}</pre>
         ) : (
           <div className="table-scroll" style={{ maxHeight: "60vh", border: "1px solid var(--border)", borderRadius: "var(--radius)" }}>

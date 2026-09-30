@@ -8,15 +8,18 @@ applied, and every action is written to an audit log in S3.
   mappings (add-only), index templates, component templates, ILM policies, ingest pipelines
 - **Rollback:** one level back; rollback *swaps*, so rolling back twice re-applies the change.
   Mappings can't be rolled back (Elasticsearch doesn't allow removing fields)
-- **Safety:** per-user, per-cluster permissions; a settings allowlist; a lock per resource;
-  drift detection; a cluster-health gate; `?dryRun=true` on every change
-- **Storage:** S3 only (no database). Conditional writes keep concurrent changes safe.
-  Cluster connection details (and their credentials) never go to S3: they live in
-  `config/clusters.yaml` and, for clusters added in the console, `data/clusters.managed.yaml`
-  on the server
-- **Data browser:** anyone with `view` on a cluster can search, read and export (CSV/JSON)
-  documents in its non-system indices, with a query bar, filters, time range, columns and
-  sort. Read-only; searches are audited (the query, never the documents)
+- **Safety:** per-user permissions per cluster **and per index** (a cluster default plus
+  index-pattern rules); a settings allowlist; a lock per resource; drift detection; a
+  cluster-health gate; `?dryRun=true` on every change. Cluster settings are admin-only
+- **Storage:** S3 for state (no database; conditional writes keep concurrent changes safe).
+  **Every secret is in AWS Secrets Manager**: the session signing key, the first-admin
+  password, console password hashes and every cluster's Elasticsearch password / API key.
+  None is in S3, `.env`, the YAML files or the audit log
+- **Data:** search, read and export (CSV/JSON) documents in non-system indices; with edit
+  access, create, edit and delete documents (each change needs a reason, is audited and keeps
+  the previous version for one-click undo), and bulk update / delete by query behind a
+  mandatory dry run, a typed count and a backup that can be restored
+- **Overview:** health plus each node's CPU, RAM, JVM heap, free disk and shards
 - **Clusters:** admins add, edit, test and remove clusters in the console or the admin API,
   with no restart; clusters in `clusters.yaml` keep working and stay read-only there
 
@@ -30,6 +33,8 @@ Interactive API docs: `http://<host>/docs`
 
 | Document | For | What's in it |
 | --- | --- | --- |
+| [`docs/FRESH_INSTALL.md`](docs/FRESH_INSTALL.md) | whoever installs the server | a clean install on EC2 from scratch, step by step, without any old data, users or passwords (also shared as a Claude Doc) |
+| [`docs/TECH_STACK.md`](docs/TECH_STACK.md) | developers, reviewers | the languages, frameworks and services used, and where each is in the repo (also shared as a Claude Doc) |
 | [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md) | everyone using the web console | every screen, step by step, with screenshots (also shared as a Claude Doc) |
 | [`docs/API_REFERENCE.md`](docs/API_REFERENCE.md) | scripts and automation | every endpoint with a ready-to-run `curl` example and its response (also shared as a Claude Doc) |
 | This README | whoever runs the API | setup on EC2, sign-in, API usage, configuration, internals |
@@ -58,27 +63,37 @@ Dockerfile, docker-compose.yml, .env.example
 
 ## Quick start on EC2
 
+For a clean install from scratch (removing an old one), follow
+[`docs/FRESH_INSTALL.md`](docs/FRESH_INSTALL.md). The short version:
+
 1. **S3 bucket**: create a bucket (for example `fenix-es-config-api`) with versioning on,
    Block Public Access on, and default encryption (SSE-S3 or SSE-KMS).
 2. **IAM role**: attach a role to the EC2 instance with `docs/iam-policy.json`, after
-   replacing the bucket name, prefix and KMS key.
-3. **Elasticsearch**: create the `config_api` service account on each cluster, and lock
-   down direct writes for people, following `docs/es-lockdown.md`.
+   replacing the bucket name, prefix, account id, region and KMS key. It allows S3 under the
+   prefix and Secrets Manager under `es-config-api/*` only. If the instance has no route to
+   the internet, add a VPC interface endpoint for `secretsmanager` (and a gateway endpoint for S3).
+3. **Elasticsearch**: create the `es_console_api` service account on each cluster (role
+   `config_api_writer`, which includes `read` and `write` on indices for the Data page), and
+   lock down direct writes for people, following `docs/es-lockdown.md`.
 4. **Configure** on the EC2 host:
    ```bash
-   cp .env.example .env                                   # S3 settings, admins, ES creds, API_PORT
+   cp .env.example .env                                   # S3, secrets prefix, admins, API_PORT: no secrets
    cp config/clusters.example.yaml config/clusters.yaml   # clusters kept in a file (may be `clusters: []`)
    mkdir -p certs && cp /path/to/ca.crt certs/            # CA certs referenced in clusters.yaml
-   mkdir -p data && sudo chown 10001:10001 data && chmod 700 data   # clusters added in the console
+   mkdir -p data && sudo chown 10001:10001 data && sudo chmod 700 data   # clusters added in the console
    ```
    Set `API_PORT=80` in `.env` to serve on port 80 (the default is 8080).
 5. **Run**
    ```bash
    docker compose up -d --build     # also builds the web console (needs npm + Docker Hub access)
    curl localhost:8080/healthz
+   # store each clusters.yaml cluster's password in Secrets Manager (prompts, never echoed):
+   docker compose exec -it es-config-api python -m app.cli set-cluster-secret elkm2-prod
    ```
-   Then open `http://<host>/ui/` and sign in as a `BOOTSTRAP_ADMINS` email with
-   `BOOTSTRAP_ADMIN_PASSWORD` (change it under **Change password**).
+   On first start the API creates the secret `es-config-api/app` with a random session key and
+   a generated first-admin password (field `bootstrapAdminPassword`). Read it in the AWS console
+   (Secrets Manager → `es-config-api/app` → Retrieve secret value), open `http://<host>/ui/`,
+   sign in as a `BOOTSTRAP_ADMINS` email and change it under **Change password**.
 6. **Restrict network access**: allow the API port only from trusted internal sources in
    the security group. Sign-in uses passwords, and until HTTPS is in front of the API they
    travel unencrypted.
@@ -93,11 +108,13 @@ Dockerfile, docker-compose.yml, .env.example
 - **curl / scripts / `/docs`:** `POST /api/v1/auth/login` returns a token; send it as
   `Authorization: Bearer <token>`. Tokens last `SESSION_HOURS` (default 12).
 
-Passwords are hashed with scrypt; the API never stores or logs a plain password.
+Passwords are hashed with scrypt. Each user's hash is its own secret in AWS Secrets Manager
+(`es-config-api/users/<email>`); S3 only records whether a password is set. The API never
+stores or logs a plain password. Sessions are signed with the key in `es-config-api/app`.
 
 | Task | How |
 | --- | --- |
-| First admin's password | `BOOTSTRAP_ADMIN_PASSWORD` in `.env`, used only while that admin has no password yet |
+| First admin's password | Generated into Secrets Manager (`es-config-api/app`, field `bootstrapAdminPassword`) on first start; used only while that admin has no password yet |
 | Add a user | `POST /api/v1/admin/users` with an email. It returns a 16-character generated password once; add `?format=csv` to download `username,password` |
 | Add several users | `POST /api/v1/admin/users/bulk`; all or nothing, with one CSV for all |
 | Change your password | `POST /api/v1/auth/change-password` (min 12 characters). Other sessions end |
@@ -116,7 +133,7 @@ A new install blocks every change until an allowlist exists.
 ```bash
 API=http://localhost:8080/api/v1
 TOKEN=$(curl -s -X POST $API/auth/login -H 'Content-Type: application/json' \
-  -d '{"username": "latish.madapada@fenixcommerce.com", "password": "<BOOTSTRAP_ADMIN_PASSWORD>"}' \
+  -d '{"username": "latish.madapada@fenixcommerce.com", "password": "<bootstrapAdminPassword from es-config-api/app>"}' \
   | python3 -c 'import sys, json; print(json.load(sys.stdin)["token"])')
 H=(-H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json')
 
@@ -142,15 +159,31 @@ curl "${H[@]}" -X PUT $API/admin/allowlist -d '{
 # Dot (system/hidden) indices only match patterns that start with "." (e.g. ".my-app-*").
 # A config type missing from the allowlist is fully locked.
 
-# Users: "view" = read only, "edit" = change / dry-run / roll back,
-#        "delete" = edit + delete indices; "*" = every cluster
+# Users: "view" = read config and documents, "edit" = change / dry-run / roll back and edit
+#        documents, "delete" = edit + delete indices and bulk-delete documents; "*" = every cluster.
+# Per index: {"default": level|null, "indices": [{"pattern": "...", "level": "none|view|edit|delete"}]};
+#        the most specific matching pattern wins, "none" hides matching indices.
 # New users get a generated password, returned once; ?format=csv downloads username,password
 curl "${H[@]}" -X POST "$API/admin/users?format=csv" -o priya.csv \
   -d '{"username": "priya@fenixcommerce.com", "clusters": {"prod-us": "edit", "staging": "edit"}}'
 curl "${H[@]}" -X POST "$API/admin/users?format=csv" -o sam.csv \
   -d '{"username": "sam@fenixcommerce.com", "clusters": {"*": "view"}}'
 curl "${H[@]}" -X PUT $API/admin/users/sam@fenixcommerce.com/permissions -d '{"staging": "edit", "prod-us": "view"}'
+# Index level: view every index on prod-us, edit the shipment indices, never see payments
+curl "${H[@]}" -X PUT $API/admin/users/sam@fenixcommerce.com/permissions -d '{"prod-us": {
+  "default": "view", "indices": [{"pattern": "shoppremium*-shipment_summary-*", "level": "edit"},
+                                 {"pattern": "payments-*", "level": "none"}]}}'
 ```
+
+**Who can do what**
+
+| Area | Needs |
+| --- | --- |
+| Cluster settings | admin |
+| Index settings, mappings, delete index | the user's level on that index (`view` read, `edit` change, `delete` delete) |
+| Documents (Data page) | `view` to search / read / export, `edit` to create / edit / delete one document or bulk update, `delete` to bulk delete, all on every index involved |
+| Templates, ILM policies, pipelines | the user's cluster default level |
+| Overview, health, nodes | any access on the cluster |
 
 ## Using it
 
@@ -205,12 +238,24 @@ every type.
 Every request body is `{"config": …, "reason": "…", "sampleDocs": [...]}`. Query flags:
 `dryRun=true`, and `force=true` to proceed despite drift (rollback) or a red cluster.
 
-Data browser (read-only, `view` access, non-system indices; `{index}` may be a pattern):
-`GET /clusters/{id}/data/{index}/_fields`, `POST /clusters/{id}/data/{index}/_search`
-(query string, filters, time range, sort, `from`/`size` up to 10,000 deep),
-`GET /clusters/{id}/data/{index}/_doc/{docId}`, `POST /clusters/{id}/data/{index}/_export`
-(`csv` / `json` / `ndjson`, up to 10,000 rows). The Elasticsearch service account needs the
-`read` index privilege for these (see `docs/es-lockdown.md`).
+Nodes: `GET /clusters/{id}/nodes` (per node CPU, RAM, heap, disk free, shards; disk watermarks).
+
+Data (non-system indices; `{index}` may be a pattern for reads; results are narrowed to the
+indices the user may see):
+- read: `GET …/data/{index}/_fields`, `POST …/data/{index}/_search` (query string, filters, time
+  range, sort, `from`/`size` up to 10,000 deep), `GET …/data/{index}/_doc/{docId}`,
+  `POST …/data/{index}/_export` (`csv` / `json` / `ndjson`, up to 10,000 rows)
+- one document (concrete index, `edit`): `POST …/_doc` (create), `PUT …/_doc/{docId}` (replace;
+  `ifSeqNo`/`ifPrimaryTerm` refuse stale edits), `DELETE …/_doc/{docId}?confirm={docId}&reason=`,
+  `GET …/_doc/{docId}/_history`, `POST …/_doc/{docId}/_restore` — each with `?dryRun=true`
+- bulk (≤ 10,000 documents): `POST …/data/{index}/_bulk_update` (`set` / `remove` fields) and
+  `…/_bulk_delete`. `?dryRun=true` is **mandatory first**: it returns the count, samples and a
+  `dryRunToken` (15 minutes); the real call must send the same body plus `dryRunToken`,
+  `expectedCount` and `reason`. `GET …/data/_changes` lists bulk changes;
+  `POST …/data/_changes/{changeId}/_restore` puts the documents back (dry run first too)
+
+The Elasticsearch service account needs the `read` and `write` index privileges for these
+(see `docs/es-lockdown.md`).
 
 Sign-in: `POST /auth/login`, `POST /auth/logout`, `POST /auth/logout-all`,
 `POST /auth/change-password`, `GET /auth/config` (public: auth mode, session length, lockout
@@ -228,17 +273,17 @@ Admin API (admins only): `GET /admin/clusters` (all clusters, pinged), `GET /adm
 
 | Status | Code examples |
 | --- | --- |
-| 400 | `INVALID_REQUEST`, `INVALID_CONFIG`, `REASON_REQUIRED`, `ES_REJECTED`, `CONFIRMATION_MISMATCH`, `INVALID_EMAIL`, `WEAK_PASSWORD`, `CANNOT_DELETE_SELF`, `INVALID_CLUSTER`, `INVALID_FILTER`, `RESULT_WINDOW_EXCEEDED` |
+| 400 | `INVALID_REQUEST`, `INVALID_CONFIG`, `REASON_REQUIRED`, `ES_REJECTED`, `CONFIRMATION_MISMATCH`, `INVALID_EMAIL`, `WEAK_PASSWORD`, `CANNOT_DELETE_SELF`, `INVALID_CLUSTER`, `INVALID_PERMISSIONS`, `INVALID_FILTER`, `RESULT_WINDOW_EXCEEDED`, `INVALID_FIELD`, `NOTHING_TO_CHANGE`, `DRY_RUN_REQUIRED`, `DRY_RUN_EXPIRED`, `DRY_RUN_MISMATCH`, `COUNT_MISMATCH` |
 | 401 | `NOT_AUTHENTICATED`, `SESSION_EXPIRED`, `INVALID_CREDENTIALS` |
 | 403 | `PERMISSION_DENIED`, `NOT_ALLOWLISTED`, `ADMIN_REQUIRED`, `CSRF_CHECK_FAILED`, `SYSTEM_INDEX` (data browser) |
 | 423 | `ACCOUNT_LOCKED` (too many failed sign-ins) |
-| 404 | `CLUSTER_NOT_FOUND`, `RESOURCE_NOT_FOUND`, `INDEX_NOT_FOUND`, `NO_SNAPSHOT`, `DOCUMENT_NOT_FOUND` |
-| 409 | `CHANGE_IN_PROGRESS`, `DRIFT_DETECTED`, `CLUSTER_UNHEALTHY`, `CONCURRENT_CHANGE`, `USER_EXISTS`, `CLUSTER_EXISTS`, `CLUSTER_READ_ONLY` (defined in clusters.yaml), `CLUSTER_MANAGEMENT_DISABLED` |
+| 404 | `CLUSTER_NOT_FOUND`, `RESOURCE_NOT_FOUND`, `INDEX_NOT_FOUND`, `NO_SNAPSHOT`, `DOCUMENT_NOT_FOUND`, `VERSION_NOT_FOUND`, `CHANGE_NOT_FOUND` |
+| 409 | `CHANGE_IN_PROGRESS`, `DRIFT_DETECTED`, `CLUSTER_UNHEALTHY`, `CONCURRENT_CHANGE`, `USER_EXISTS`, `CLUSTER_EXISTS`, `CLUSTER_READ_ONLY` (defined in clusters.yaml), `CLUSTER_MANAGEMENT_DISABLED`, `DOCUMENT_CHANGED` (edited by someone else since you read it), `DOCUMENT_EXISTS`, `COUNT_CHANGED` (documents changed since the bulk dry run) |
 | 412 | `VERSION_MISMATCH` (If-Match) |
-| 422 | `STATIC_SETTING`, `READ_ONLY_SETTING`, `MAPPING_CONFLICT`, `ROLLBACK_NOT_SUPPORTED`, `NOT_A_CONCRETE_INDEX`, `DATA_STREAM_WRITE_INDEX`, `CLUSTER_TEST_FAILED` (add/edit; `?skipTest=true` saves anyway) |
+| 422 | `STATIC_SETTING`, `READ_ONLY_SETTING`, `MAPPING_CONFLICT`, `ROLLBACK_NOT_SUPPORTED`, `NOT_A_CONCRETE_INDEX`, `DATA_STREAM_WRITE_INDEX`, `CLUSTER_TEST_FAILED` (add/edit; `?skipTest=true` saves anyway), `TOO_MANY_DOCUMENTS` (bulk over 10,000) |
 | 409 | `LOCK_LOST` (change outlived its lock) |
-| 500 | `CLUSTERS_FILE_NOT_WRITABLE` (the `data/` folder isn't writable by the container) |
-| 502 | `CLUSTER_UNREACHABLE`, `ES_AUTH_FAILED`, `ES_UNAVAILABLE` (ES 5xx / 429), `ES_READ_NOT_ALLOWED` (service account lacks `read`) |
+| 500 | `CLUSTERS_FILE_NOT_WRITABLE` (the `data/` folder isn't writable by the container), `SECRETS_ACCESS_DENIED` (the EC2 role lacks the Secrets Manager permissions) |
+| 502 | `CLUSTER_UNREACHABLE`, `ES_AUTH_FAILED`, `ES_UNAVAILABLE` (ES 5xx / 429), `ES_READ_NOT_ALLOWED` / `ES_WRITE_NOT_ALLOWED` (service account lacks `read` / `write`), `CLUSTER_CREDENTIALS_MISSING` (no secret for that cluster), `SECRETS_UNAVAILABLE` |
 
 ## How a change runs
 
@@ -267,10 +312,25 @@ state/allowlist/global.json                  global allowlist
 state/allowlist/{cluster}.json               per-cluster override
 audit/yyyy/mm/dd/{time}_{eventId}.json       one object per audit event
 deleted-indices/{cluster}/{index}/{time}_{changeId}.json   settings, mappings, aliases of a deleted index
+doc-versions/{cluster}/{index}/{docId}/{time}_{changeId}.json   a document before each edit/delete/restore
+bulk-changes/{cluster}/{time}_{changeId}.json   what a bulk update/delete/restore did (who, why, counts)
+bulk-backups/{cluster}/{time}_{changeId}.json   the documents as they were before that bulk change
 ```
 
-Not in S3: cluster connection details and credentials. They stay on the server, in
-`config/clusters.yaml` + `.env`, and `data/clusters.managed.yaml` (see *Clusters* below).
+`doc-versions/` and `bulk-backups/` hold document contents (the data being edited). Keep the
+bucket private and encrypted, and set a lifecycle rule (for example 90 days) on those prefixes
+if you don't want copies kept forever.
+
+Not in S3: any secret. AWS Secrets Manager holds, under `SECRETS_PREFIX` (default `es-config-api/`):
+
+```text
+app                    {"sessionSecret", "bootstrapAdminPassword"}   created on first start
+users/<email>          {"passwordHash"}                             one per console user
+clusters/<clusterId>   {"password"} or {"apiKey"}                   one per Elasticsearch cluster
+```
+
+Cluster connection details (URLs, username, TLS) stay on the server in `config/clusters.yaml`
+and `data/clusters.managed.yaml`.
 
 Audit events are also printed to stdout as JSON lines, for CloudWatch or any log shipper.
 To make the audit log tamper-proof, turn on S3 Object Lock for `audit/`.
@@ -282,16 +342,19 @@ To make the audit log tamper-proof, turn on S3 Object Lock for `audit/`.
 | `STORAGE_BACKEND` | `s3` | `local` = files on disk (dev only) |
 | `S3_BUCKET`, `S3_PREFIX`, `AWS_REGION` | —, `es-config-api/`, — | where state lives |
 | `S3_SSE` | bucket default | `aws:kms` or `AES256` to force encryption per object |
+| `SECRETS_BACKEND` | `aws` | `aws` = AWS Secrets Manager; `local` = files in `LOCAL_SECRETS_DIR` (dev and tests only) |
+| `SECRETS_PREFIX` | `es-config-api/` | name prefix of every secret; the IAM policy is scoped to it |
+| `SECRETS_KMS_KEY_ID` | AWS managed key | customer-managed KMS key for new secrets |
 | `API_PORT` | `8080` | host port docker compose publishes (e.g. `80`) |
 | `CLUSTERS_FILE` | `/app/config/clusters.yaml` | clusters kept in a file (read-only in the console); optional |
 | `MANAGED_CLUSTERS_FILE` | `/app/data/clusters.managed.yaml` | where clusters added in the console / admin API are saved; empty turns adding clusters off |
 | `AUTH_MODE` | `password` | `password` for real use (the web console needs it); `header` trusts an `X-User` header and is for automated tests only |
-| `SESSION_SECRET` | — (required) | 32+ random characters that sign sessions; changing it signs everyone out |
+| `SESSION_SECRET` | — (not needed) | legacy: if set, copied once into `<prefix>app` and then ignored; delete it from `.env` |
 | `SESSION_HOURS` | `12` | session length |
 | `COOKIE_SECURE` | `false` | set `true` once served over HTTPS |
 | `LOCKOUT_ATTEMPTS`, `LOCKOUT_MINUTES` | `5`, `15` | failed sign-ins before a lock, and its length |
 | `BOOTSTRAP_ADMINS` | — | comma-separated admin emails |
-| `BOOTSTRAP_ADMIN_PASSWORD` | — | their first password (used only until changed) |
+| `BOOTSTRAP_ADMIN_PASSWORD` | — (not needed) | legacy: if set, copied once into `<prefix>app`; otherwise a password is generated there |
 | `LOCK_TTL_SECONDS` | `600` | lock expiry; keep above the slowest possible request |
 | `AUDIT_QUERY_LIMIT` | `500` | max events per audit query |
 
@@ -301,15 +364,23 @@ There are two ways to register a cluster; both can be used at the same time.
 
 | | Added in the console or API | Listed in `config/clusters.yaml` |
 | --- | --- | --- |
-| How | **Administration → Clusters → Add cluster**, or `POST /api/v1/admin/clusters` | edit the file, credentials in `.env` as `${VAR}`, `docker compose up -d` |
-| Stored in | `data/clusters.managed.yaml` on the server (mode 600), **never S3** | the file + `.env` |
-| Restart | none: both API workers pick up the change within a second | required |
-| Change / remove | in the console or API | only in the file (read-only in the console) |
-| Credentials | write-only: the API never returns a password or API key | env vars |
+| How | **Administration → Clusters → Add cluster**, or `POST /api/v1/admin/clusters` | edit the file (no password line), store the password with `python -m app.cli set-cluster-secret <id>`, `docker compose up -d` |
+| Details stored in | `data/clusters.managed.yaml` on the server (mode 600) | the file |
+| Password / API key | AWS Secrets Manager `es-config-api/clusters/<id>`, written by the API | the same secret (or the one named in `auth.secret`) |
+| Restart | none: both API workers pick up the change within a second | required for file changes; a rotated secret is picked up within 5 minutes |
+| Change / remove | in the console or API (removing deletes the secret too) | only in the file (read-only in the console) |
+| Credentials returned | never: write-only | never |
+
+A `${VAR}` password still in `clusters.yaml` works (for local development) and is copied into
+the cluster's secret at start, so you can delete the line and the `.env` variable afterwards.
+**Administration → Clusters → Details** shows where each cluster's password is and whether the
+secret exists.
 
 When you add or edit a cluster the API first connects to it (`GET /` and cluster health,
 8 s timeout) and refuses to save if that fails (`CLUSTER_TEST_FAILED`, with the reason);
-`?skipTest=true` saves anyway, for a cluster that is down right now. Use a service account
+`?skipTest=true` saves anyway, for a cluster that is down right now. **The password is
+optional:** a cluster with security turned off needs none, so leave it empty (or send
+`"auth": {"type": "none"}`) and it is saved and used without authentication. Use a service account
 with the `config_api_writer` role from `docs/es-lockdown.md`, not `elastic`. A custom CA can
 be pasted as PEM (`caCertPem`). Removing a cluster (`?confirm=<id>`) also removes it from every
 user's access and deletes its allowlist override; its snapshots and audit history stay in S3.
@@ -322,12 +393,28 @@ curl -X POST "http://<host>/api/v1/admin/clusters" -H "Authorization: Bearer $TO
   -H "Content-Type: application/json" -d '{
     "id": "prod-eu", "name": "Production EU",
     "hosts": ["https://10.0.3.10:9200"],
-    "auth": {"type": "basic", "username": "config_api", "password": "..."},
+    "auth": {"type": "basic", "username": "es_console_api", "password": "..."},
     "verifyCerts": true, "caCertPem": "-----BEGIN CERTIFICATE-----\n...", "tags": ["production"]}'
 ```
 
-Protect `data/`: it holds cluster passwords. Keep it out of git (it's in `.gitignore`), readable
-only by the container user (uid 10001), and include it in the EC2 backup (EBS snapshot).
+`data/` holds no secrets any more, only connection details; keep it out of git (it's in
+`.gitignore`) and in the EC2 backup (EBS snapshot).
+
+## Upgrading an existing server (secrets move to Secrets Manager)
+
+1. Add the `SecretsManagerOwnPrefixOnly` statement from `docs/iam-policy.json` to the EC2 role
+   (and a `secretsmanager` VPC endpoint if the instance has no internet route).
+2. Add `read` and `write` to the `config_api_writer` role on each cluster (`docs/es-lockdown.md`).
+3. Pull, add `SECRETS_BACKEND=aws` and `SECRETS_PREFIX=es-config-api/` to `.env`, then
+   `docker compose up -d --build`. On start the API moves, once and automatically:
+   `SESSION_SECRET` and `BOOTSTRAP_ADMIN_PASSWORD` from `.env` into `es-config-api/app` (sessions
+   stay valid), every console password hash from `state/users.json` into
+   `es-config-api/users/<email>`, the passwords in `data/clusters.managed.yaml` into
+   `es-config-api/clusters/<id>`, and `${VAR}` passwords from `clusters.yaml` into the same. The
+   logs list what moved.
+4. Check with `docker compose exec es-config-api python -m app.cli secrets-status`, then delete
+   `SESSION_SECRET`, `BOOTSTRAP_ADMIN_PASSWORD` and the `ES_*_PASSWORD` lines from `.env` and the
+   `password:` lines from `clusters.yaml`, and restart.
 
 ## Web console
 
@@ -342,10 +429,12 @@ Content-Security-Policy, `X-Frame-Options: DENY` and `nosniff`. Screens:
 | Overview | Health, index and document counts, your access; admins also see the allowlist summary and today's activity |
 | Cluster settings, index settings, templates, ILM policies, pipelines | Edit JSON → **Dry run** (diff, warnings, ES simulation) → reason → **Apply**; view the snapshot; **Roll back** with a preview |
 | Index mapping | Current fields; add fields with an explicit "can't be undone" confirmation |
-| Indices | Filter, **Browse** its documents, open settings/mapping, **Delete** (type the name + reason); "Deleted through the API" shows saved definitions |
-| Data | Pick an index or pattern; Lucene query, filters (is / is one of / contains / between / exists, nested fields too), time range; choose columns, sort, page; open a document (fields + JSON, filter for/out a value); **Export** CSV / JSON / NDJSON |
+| Overview | Health, counts, your access, and a **Nodes** table: CPU, RAM, JVM heap, disk free and shards per node (refreshes every 30 s) |
+| Indices | Only indices you may see, with your level on each; **Browse** its documents, settings/mapping, **Delete** (type the name + reason); "Deleted through the API" shows saved definitions |
+| Data | Lucene query, filters, time range, columns, sort, paging; a document's fields / JSON / **History**; **Edit**, **Delete**, **New document** (reason, diff preview, undo); **Bulk** update / delete (mandatory dry run, typed count, backup, **Bulk changes** undo); **Export** CSV / JSON / NDJSON |
+| Cluster settings (admin) | Moved under Administration; admins only |
 | Clusters (admin) | All clusters with live status; add a cluster (test connection first), edit URLs / credentials / TLS, remove; `clusters.yaml` entries shown read-only |
-| Users (admin) | Add users by email (bulk), generated passwords shown once + **Download CSV**, per-cluster access, reset password, remove |
+| Users (admin) | Add users by email (bulk), generated passwords shown once + **Download CSV**; per cluster a default level plus **index rules** (pattern → none / view / edit / delete); reset password, remove |
 | Allowlist (admin) | Global list and per-cluster overrides; unlock/lock types, add allow/deny patterns, or edit as JSON |
 | Audit log (admin) | Filter by day, cluster, user, action, outcome; expand an event for error, diff and request id; export JSON |
 
@@ -362,7 +451,7 @@ The tests run against a **real** Elasticsearch 8.17 cluster; S3 is mocked with m
 pip install -r requirements-dev.txt
 ES_TEST_URL=http://127.0.0.1:9200 ES_TEST_USER=elastic ES_TEST_PASSWORD=... pytest -q
 # To prove the lockdown role is enough, run the API calls as the service account:
-ES_TEST_API_USER=config_api ES_TEST_API_PASSWORD=... pytest -q
+ES_TEST_API_USER=es_console_api ES_TEST_API_PASSWORD=... pytest -q
 ```
 
 Run locally without AWS: `STORAGE_BACKEND=local CLUSTERS_FILE=./config/clusters.yaml
@@ -382,6 +471,10 @@ uvicorn app.main:create_app --factory --reload`
 - Clusters added in the console are saved on that one server; running several API servers
   would need `data/` on shared storage (or clusters kept in `clusters.yaml`)
 - The data browser pages through the first 10,000 matches (Elasticsearch's result window) and
-  exports at most 10,000 rows; narrow the search for more. Searches are audited one event per
-  page, so the audit log grows with use
+  exports at most 10,000 rows; bulk changes are limited to 10,000 documents. Searches are
+  audited one event per page, so the audit log grows with use
+- Document edits replace the whole document (`_source`); documents in data streams are
+  read-only in the console. Undo keeps one saved copy per change (all of them are listed)
+- Secrets Manager costs about $0.40 per secret per month: one for the app, one per console
+  user and one per cluster
 - `composed_of` component templates in an index template aren't checked against the allowlist

@@ -219,15 +219,48 @@ def test_token_tamper_rejected(papp):
     assert read_token("y" * 40, t) is None
 
 
-def test_startup_requires_bootstrap_password(env):
+def test_first_start_puts_every_secret_in_secrets_manager(env):
+    """No SESSION_SECRET / BOOTSTRAP_ADMIN_PASSWORD anywhere: both are generated into the
+    app secret; the admin signs in with the generated password; S3 never holds a hash."""
+    import json as _json
+    from app.secret_store import AwsSecretStore
+    sm = boto3.client("secretsmanager", region_name="us-east-1")
     s = Settings(storage_backend="s3", s3_bucket="es-config-api-test", s3_prefix="auth2/",
                  clusters_file=env["app"].state.settings.clusters_file, auth_mode="password",
-                 bootstrap_admins=["boss@fenixcommerce.com"], session_secret=SECRET)
-    with pytest.raises(RuntimeError, match="BOOTSTRAP_ADMIN_PASSWORD"):
-        create_app(s, store=S3Store("es-config-api-test", "auth2/", client=env["s3"]),
-                   registry=ClusterRegistry(load_clusters(s.clusters_file)))
-    with pytest.raises(ValueError, match="SESSION_SECRET"):
-        Settings(auth_mode="password", s3_bucket="b", session_secret="short").validate()
+                 bootstrap_admins=["boss@fenixcommerce.com"], secrets_prefix="t2/")
+    store = S3Store("es-config-api-test", "auth2/", client=env["s3"])
+    app = create_app(s, store=store, registry=ClusterRegistry(load_clusters(s.clusters_file)),
+                     secrets=AwsSecretStore("t2/", client=sm))
+    appsec = _json.loads(sm.get_secret_value(SecretId="t2/app")["SecretString"])
+    assert len(appsec["sessionSecret"]) >= 32 and appsec["bootstrapAdminPassword"]
+    c = TestClient(app)
+    r = login(c, "boss@fenixcommerce.com", appsec["bootstrapAdminPassword"])
+    assert r.status_code == 200, r.text
+    assert read_token(appsec["sessionSecret"], r.json()["token"])["sub"] == "boss@fenixcommerce.com"
+    users, _ = store.get_json("state/users.json")
+    assert "passwordHash" not in _json.dumps(users) and users["users"]["boss@fenixcommerce.com"]["hasPassword"]
+    h = _json.loads(sm.get_secret_value(SecretId="t2/users/boss@fenixcommerce.com")["SecretString"])
+    assert h["passwordHash"].startswith("scrypt$")
+
+
+def test_legacy_hashes_in_s3_move_to_secrets_manager(env):
+    """An older deployment kept hashes in users.json: the next start moves them."""
+    import json as _json
+    from app.auth import hash_password
+    from app.secret_store import AwsSecretStore
+    sm = boto3.client("secretsmanager", region_name="us-east-1")
+    store = S3Store("es-config-api-test", "auth3/", client=env["s3"])
+    store.put_json("state/users.json", {"users": {"old@fenixcommerce.com": {
+        "admin": True, "clusters": {}, "passwordHash": hash_password("Old-Password-2026"),
+        "tokenVersion": 1}}})
+    s = Settings(storage_backend="s3", s3_bucket="es-config-api-test", s3_prefix="auth3/",
+                 clusters_file=env["app"].state.settings.clusters_file, auth_mode="password",
+                 session_secret=SECRET, secrets_prefix="t3/")
+    app = create_app(s, store=store, registry=ClusterRegistry(load_clusters(s.clusters_file)),
+                     secrets=AwsSecretStore("t3/", client=sm))
+    users, _ = store.get_json("state/users.json")
+    assert "passwordHash" not in _json.dumps(users)
+    assert login(TestClient(app), "old@fenixcommerce.com", "Old-Password-2026").status_code == 200
 
 
 def test_auth_config_is_public(papp):
@@ -258,3 +291,36 @@ def test_ui_is_served_with_security_headers(papp):
     assert c.get("/ui/../app/main.py").status_code in (200, 404)  # never the source file
     assert "create_app" not in c.get("/ui/..%2Fmain.py").text
     assert c.get("/api/v1/clusters").headers["x-content-type-options"] == "nosniff"
+
+
+def test_workers_starting_together_share_the_first_secrets(env):
+    """uvicorn starts two workers at once: on a fresh install they must end up with the same
+    session key and one first-admin password that really works (a startup lock in S3)."""
+    import json as _json
+    import threading
+    from app.secret_store import AwsSecretStore
+    sm = boto3.client("secretsmanager", region_name="us-east-1")
+    s = Settings(storage_backend="s3", s3_bucket="es-config-api-test", s3_prefix="auth4/",
+                 clusters_file=env["app"].state.settings.clusters_file, auth_mode="password",
+                 bootstrap_admins=["boss@fenixcommerce.com"], secrets_prefix="t4/")
+    apps, errors = [], []
+
+    def start():
+        try:
+            apps.append(create_app(s, store=S3Store("es-config-api-test", "auth4/", client=env["s3"]),
+                                   registry=ClusterRegistry(load_clusters(s.clusters_file)),
+                                   secrets=AwsSecretStore("t4/", client=sm)))
+        except Exception as e:  # pragma: no cover - reported below
+            errors.append(e)
+
+    threads = [threading.Thread(target=start) for _ in range(3)]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+    assert not errors and len(apps) == 3
+    appsec = _json.loads(sm.get_secret_value(SecretId="t4/app")["SecretString"])
+    assert {a.state.settings.session_secret for a in apps} == {appsec["sessionSecret"]}
+    for a in apps:
+        r = login(TestClient(a), "boss@fenixcommerce.com", appsec["bootstrapAdminPassword"])
+        assert r.status_code == 200, r.text
+    # the startup lock is released
+    assert S3Store("es-config-api-test", "auth4/", client=env["s3"]).get_json("locks/_app/startup/init.lock")[0] is None

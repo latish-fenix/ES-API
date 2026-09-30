@@ -1,14 +1,16 @@
 # ES Config Console — User Guide
 
-*Last updated 29 September 2026 (adding clusters, and the data browser). The same guide, kept in sync, is also a shared Claude Doc.*
+*Last updated 30 September 2026: optional cluster passwords, index-level access, editing documents with undo, bulk changes, node stats on the Overview, cluster settings under Administration. The same guide, kept in sync, is also a shared Claude Doc.*
 
-The ES Config Console is the web page for reading and changing Elasticsearch configuration safely: every change is previewed first, saved to S3 before it is applied, and written to an audit log.
+The ES Config Console is the web page for reading and changing Elasticsearch configuration and documents safely: every change is previewed first, the previous state is saved before it is applied, and everything is written to an audit log.
 
 - **Address:** <http://172.0.58.49/ui/> (the internal network only; `http://172.0.58.49/` opens it too)
 - **Who it's for:** anyone who changes cluster settings, index settings, mappings, templates, ILM policies or ingest pipelines, developers who need to look at the documents in an index, and the admins who manage who may do what
 - **The one rule to remember:** every change goes **Edit → Dry run → Apply**. The dry run shows exactly what would change and touches nothing. Apply saves the current config as a snapshot first, so one click rolls it back
 
-What you can see and do depends on your access level on each cluster (see [Finding your way](#finding-your-way)). Admins also get the Clusters, Users, Allowlist and Audit log pages.
+What you can see and do depends on your access on each cluster, and sometimes on each index (see [Access levels](#access-levels)). Admins also get Cluster settings and the Clusters, Users, Allowlist and Audit log pages.
+
+Installing the server from scratch: [FRESH_INSTALL.md](FRESH_INSTALL.md). The languages and services the project is built with: [TECH_STACK.md](TECH_STACK.md).
 
 For scripts and automation, the same actions are available through the API; see [API_REFERENCE.md](API_REFERENCE.md) (also shared as the [ES Config API endpoint reference](https://claude.ai/code/artifact/21683e33-2775-49ce-ada3-c6a7ce220773)).
 
@@ -51,11 +53,28 @@ Everything happens on one cluster at a time: pick it in the **Cluster** box at t
 
 ![Overview page](images/02-overview.png)
 
-- **Sidebar, Configure:** Overview, Cluster settings, Indices, Index templates, Component templates, ILM policies, Ingest pipelines
-- **Sidebar, Administration** (admins only): Users, Allowlist, Audit log
+- **Sidebar, Configure:** Overview, Indices, Data, Index templates, Component templates, ILM policies, Ingest pipelines (the last four only if you have access to the whole cluster)
+- **Sidebar, Administration** (admins only): Cluster settings, Clusters, Users, Allowlist, Audit log
 - **Top bar:** where you are (click a part to go back) and the cluster's health (green, yellow or red), refreshed every minute
-- **Overview:** health, number of indices and documents (system indices hidden), your access, and links to each area. Admins also see what the allowlist allows on this cluster and today's activity
+- **Overview:** health, number of indices and documents (system indices hidden), your access, the **Nodes** table, and links to each area. Admins also see what the allowlist allows on this cluster and today's activity
 - **Switching clusters** keeps you on the same kind of page (for example Indices on the other cluster)
+
+### Nodes: CPU, memory and disk
+
+The **Nodes** card on the Overview shows every node of the cluster, refreshed every 30 seconds:
+
+![Nodes on the Overview](images/27-nodes.png)
+
+| Column | What it shows | Watch for |
+| --- | --- | --- |
+| Node | Name, **master** badge on the elected master, IP, roles, version | — |
+| CPU | CPU use now, and the 1-minute load / number of CPUs | Staying above 75–90% |
+| RAM | Memory used by the whole server | High is normal on Linux (the file cache counts as used) |
+| JVM heap | Elasticsearch's own memory | Above 75% (amber) or 85% (red) for long |
+| Disk used | Used %, and free space of total | The bar turns amber at the *low* watermark (85%: no new shards placed there) and red at the *high* one (90%: shards move away). At 95% indices become read-only |
+| Shards | Shards on that node | Very uneven numbers between nodes |
+
+The four boxes above the table sum it up: number of nodes, total free disk, average and busiest CPU, average and highest heap.
 
 ### Access levels
 
@@ -64,9 +83,15 @@ An admin sets your level per cluster. Each level includes the ones above it.
 | Level | You can |
 | --- | --- |
 | View | Read config, health, snapshots and the deleted-index list; search, read and export documents under **Data** |
-| Edit | Also dry run, apply and roll back changes |
-| Delete | Also delete indices |
-| Admin | Everything on every cluster, plus Clusters, Users, Allowlist and Audit log |
+| Edit | Also dry run, apply and roll back changes; edit, add and delete single documents; bulk update documents |
+| Delete | Also delete indices and bulk delete documents |
+| Admin | Everything on every cluster, including **Cluster settings**, plus Clusters, Users, Allowlist and Audit log |
+
+**Access per index.** An admin can also give you a different level on some indices, for example View on the cluster but Edit on `shoppremium*`, or no access to `payments-*`. Then:
+
+- **Indices** and **Data** only show the indices you may see, and the Indices page has a **Your access** column
+- Index settings, mappings, deleting an index and documents follow your level on that index
+- Templates, ILM policies and pipelines follow your level on the cluster (if you only have index rules, those pages aren't shown)
 
 Even with Edit or Delete, you can only change what the **allowlist** allows. A setting, index or policy that isn't on it is refused with "Not on the allowlist"; ask an admin if you need it.
 
@@ -116,7 +141,7 @@ There is one level of rollback, and it **swaps**: the config you replace becomes
 
 ## Cluster settings
 
-This page manages the cluster's **persistent** settings; send only the keys you want to change.
+**Admins only.** It's under **Administration → Cluster settings** in the sidebar and applies to the cluster picked at the top. This page manages the cluster's **persistent** settings; send only the keys you want to change.
 
 ![Cluster settings after a change](images/04-cluster-settings-applied.png)
 
@@ -138,7 +163,7 @@ A key that isn't on the allowlist, or is on its deny list, is refused at the dry
 
 ## Indices
 
-The Indices page lists every index (system indices starting with a dot are hidden) with its health, status and document count; click a name to open its settings or mapping.
+The Indices page lists every index you may see (system indices starting with a dot are hidden) with its health, status and document count; click a name to open its settings or mapping, or **Browse** to see its documents.
 
 ![Indices list](images/07-indices.png)
 
@@ -185,9 +210,9 @@ The **Deleted through the API** tab lists every index deleted this way, who dele
 
 ![Deleted indices](images/11-deleted-indices.png)
 
-## Browsing data
+## Data: browse and edit documents
 
-**Data** in the sidebar lets you search and read the documents in an index, filter them, pick columns, open one, and export the results. It's read-only: nothing here changes data. You need View access (or more) on the cluster. System indices (names starting with a dot) can't be opened.
+**Data** in the sidebar lets you search and read the documents in an index, filter them, pick columns, open one, and export the results. With Edit access you can also change documents, one at a time or in bulk, and undo those changes (see [Edit, add or delete a document](#edit-add-or-delete-a-document)). You need at least View on the index. System indices (names starting with a dot) can't be opened, and a pattern only shows the indices you may see.
 
 ![Data browser with a query, a time range and two filters](images/23-data-browser.png)
 
@@ -232,6 +257,56 @@ In **Fields**, **+** next to a value adds the filter "field is this value", and 
 **Export** downloads what the current search, filters and sort match: **CSV** (opens in Excel; the shown columns or every field), **JSON** or **NDJSON**, up to 10,000 documents. Values that could run as a spreadsheet formula are made safe.
 
 Exports and searches are recorded in the audit log with your email and the query, never the documents themselves. An export can hold customer details, so store and share the file accordingly.
+
+### Edit, add or delete a document
+
+With **Edit** access on an index you can change its documents. Every change needs a reason, is recorded in the audit log, and keeps the document as it was so it can be put back.
+
+**Edit a document**
+
+1. Click a row, then **Edit**.
+2. Change the JSON (it's the whole document; fields you remove are removed).
+3. **Preview changes** shows exactly which fields change, from what to what. Nothing is saved yet.
+4. Enter a reason and click **Save document**.
+
+![Editing a document: preview and reason](images/29-doc-edit.png)
+
+If someone else changed the same document after you opened it, saving is refused ("changed since you read it"), so their change isn't lost: reload the page and edit again.
+
+**Add a document:** **New document** above the results. Pick the index (only indices you may edit are listed), give an id or leave it empty for an automatic one, type the JSON (or **Start from a copy of the first row**), add a reason and **Create document**.
+
+**Delete a document:** open it, **Delete**, type its id and a reason. A copy is kept.
+
+Documents in data streams (indices named `.ds-…`) are read-only here.
+
+### Undo a change to a document
+
+Open the document and choose the **History** tab. It lists every change made through the console or API, newest first, with who, when, why and which fields.
+
+![History of a document, with the restore preview](images/30-doc-history.png)
+
+**Restore the version before** shows what would change back; add a reason and click **Restore**. A deleted document is recreated; a document you created can be removed again (**Undo the create**). The restore itself is saved in the history too, so it can be undone as well.
+
+### Bulk update or delete matching documents
+
+**Bulk** (next to Export) changes every document the current search matches: the index or pattern, query, filters and time range you see. Up to 10,000 documents at a time. Bulk update needs Edit, bulk delete needs Delete, on every index involved.
+
+1. Search and filter until the table shows exactly the documents you mean.
+2. **Bulk → Update matching documents…**: add the fields to set (value as plain text, or JSON such as `123`, `true`, `null`), and optionally fields to remove. For **Delete matching documents…** there's nothing to fill in.
+3. **Dry run** (required). It shows how many documents will change, examples of the before and after, and warnings (for example when there's no query or filter, so it would hit every document).
+4. Enter a reason and **type the number of documents** to confirm, then click **Update N documents** / **Delete N documents**.
+
+![Bulk update after the dry run](images/31-bulk-dry-run.png)
+
+Before writing anything, every matching document is backed up. If the matching documents changed after the dry run (someone added or edited one), you're asked to run the dry run again. A document edited by someone else in the last moment is left alone and reported as skipped.
+
+### Undo a bulk change
+
+**Bulk → Bulk changes and undo…** lists every bulk update and delete on the cluster, with who, when, why and how many documents.
+
+![Bulk changes, with a restore being confirmed](images/32-bulk-changes.png)
+
+**Restore…** puts every document of that change back exactly as it was before (deleted ones come back). Later edits to those documents are overwritten, but they're backed up first, so the restore can be undone too. It asks for a reason and the number of documents, like the change itself.
 
 ## Templates, ILM policies and ingest pipelines
 
@@ -283,7 +358,9 @@ The **Added** column shows where each cluster comes from:
 2. **Cluster id**: lowercase letters, digits, `-` and `_`, for example `elkm2-staging`. It appears in addresses and the audit log, and can't be changed later.
 3. **Display name** and **Description** (optional).
 4. **Node URLs**: one per line, with `http://` or `https://` and the port, for example `http://node1.elkm2.stage.int.fenixcommerce.com:9200`. Two or three nodes are better than one.
-5. **Authentication**: **Username and password** (usual), **API key**, or **None** (only for a cluster with security turned off). Use the `config_api` service account with the `config_api_writer` role (see `docs/es-lockdown.md`), not `elastic` or a personal login.
+5. **Authentication**: **Username and password** (usual), **API key**, or **No password** (for a cluster with security turned off). The password is optional: if the cluster needs none, leave it empty and the cluster is saved without authentication (the dialog says so under the field). Otherwise use the cluster's service account (for example `es_console_api`) with the `config_api_writer` role (see `docs/es-lockdown.md`), not `elastic` or a personal login.
+
+    ![A cluster without a password: the connection test passes and it is saved without authentication](images/33-cluster-no-password.png)
 6. For HTTPS with your own certificate authority, open **HTTPS and advanced settings** and paste the CA certificate (PEM). The same section has **Verify TLS certificates** (leave it on), the request timeout and tags.
 7. Click **Test connection**. Green shows the Elasticsearch version, cluster name, health and node count; red says what went wrong. Nothing is saved yet.
 8. Click **Add cluster**. It is tested again, saved, and appears in the cluster switcher straight away.
@@ -307,7 +384,7 @@ Click **Edit** on a cluster added in the console.
 
 Every add, change and removal is in the audit log (`ADMIN_CLUSTER_CREATE`, `ADMIN_CLUSTER_UPDATE`, `ADMIN_CLUSTER_DELETE`) with who did it; passwords and API keys never are.
 
-**Where the credentials live.** Clusters added here, with their passwords or API keys, are kept in one file on the API server (`data/clusters.managed.yaml`, readable only by the API). They are never written to S3, never returned by the API, and never shown in the console after you save them.
+**Where the credentials live.** The connection details are kept in a file on the API server (`data/clusters.managed.yaml`); the password or API key is stored in **AWS Secrets Manager** as `es-config-api/clusters/<cluster id>`. It's never written to S3 or to that file, never returned by the API, and never shown in the console after you save it. **Details** (and the edit dialog) show where it is, and warn if the secret is missing.
 
 ## Admins: users and passwords
 
@@ -320,7 +397,7 @@ The table shows each user's role, their level on each cluster, when they last si
 | Password status | Meaning |
 | --- | --- |
 | Generated | Still using the password an admin generated |
-| Initial (.env) | A bootstrap admin still using `BOOTSTRAP_ADMIN_PASSWORD` from the server's `.env` |
+| Initial | A bootstrap admin still using the first-admin password (from the `es-config-api/app` secret in AWS Secrets Manager) |
 | Set by user | They changed it themselves |
 | Locked | 5 failed sign-ins; locked for 15 minutes or until reset |
 
@@ -328,7 +405,7 @@ The table shows each user's role, their level on each cluster, when they last si
 
 1. Click **Add users**.
 2. Enter one or more emails (one per line, or separated by commas).
-3. Choose their access on each cluster (**All clusters** applies to every cluster, including ones added later), or tick **Make admin**.
+3. Choose their access on each cluster (**All clusters** applies to every cluster, including ones added later), optionally with index rules (below), or tick **Make admin**.
 4. Click **Create**. It's all or nothing: if one email already exists, nobody is created and the dialog names who.
 
 ![Add users dialog](images/15-add-users.png)
@@ -336,6 +413,20 @@ The table shows each user's role, their level on each cluster, when they last si
 The next screen shows each generated password **once**. Click **Download CSV** (`username,password`) or copy each password, and send each person theirs privately. If you close the dialog without downloading, it warns you first; after that the passwords can't be shown again, so you'd reset them.
 
 ![Passwords shown once, with Download CSV](images/16-users-created-csv.png)
+
+### Access per index (index rules)
+
+Next to each cluster's level, **Indices** opens its index rules. Each rule is an index pattern (`*` matches anything) and a level:
+
+![Index rules while adding a user](images/28-user-index-rules.png)
+
+| You want | Cluster level | Index rules |
+| --- | --- | --- |
+| Read everything, change only the shipment indices | View | `shoppremium*-shipment_summary-*` → Edit |
+| Everything except payments | Edit | `payments-*` → No access |
+| Only two groups of indices, nothing else (no templates, ILM, pipelines) | Only index rules | `shoppremium*` → Edit, `delest-log-*` → View |
+
+When several rules match an index, the most specific one wins: an exact index name beats a pattern, and a longer pattern beats a shorter one (`shop-orders-*` beats `shop*`). An index no rule matches gets the cluster level. Users who have rules show **+N index rules** in the table.
 
 ### Change access, reset a password, remove a user
 
@@ -345,7 +436,7 @@ Click a user to open the panel on the right.
 - **Reset password…:** generates a new password shown once with a CSV, ends all their sessions, and unlocks a locked account
 - **Remove user:** asks you to confirm. They can't sign in any more; their past changes stay in the audit log
 
-You can't remove yourself or take away your own admin rights, and bootstrap admins (set in `.env` on the server) can't be changed here. If the only admin is locked out, someone with server access runs `docker compose exec es-config-api python -m app.cli reset-password <email>`.
+Passwords are stored as one-way hashes in AWS Secrets Manager, one secret per user; nobody, including admins, can read a password back. You can't remove yourself or take away your own admin rights, and bootstrap admins (set in `.env` on the server) can't be changed here. If the only admin is locked out, someone with server access runs `docker compose exec es-config-api python -m app.cli reset-password <email>`.
 
 Treat a downloaded CSV like a key: anyone holding it can sign in as those users. Delete it once each person has their password.
 
@@ -405,6 +496,11 @@ A red box always means nothing was changed; its last line shows the error code a
 | Invalid JSON | A typo in the editor (red underline) | Fix the highlighted line |
 | Can't reach the cluster | The API server can't connect to Elasticsearch | Tell whoever runs the API server |
 | System and hidden indices can't be browsed | The name or pattern starts with a dot | Browse the normal index instead |
+| Changed since you read it | Someone else edited the document after you opened it | Reload the page and make your edit again |
+| Run the dry run again | The documents a bulk change matches changed after the dry run, or it's older than 15 minutes | Click **Dry run again** and check the new count |
+| … documents match; bulk changes are limited to 10,000 | The search matches too many documents | Add a filter or time range, or split it by date |
+| The API's Elasticsearch account may not write documents | The service account lacks the `write` privilege | Whoever runs the server: add `write` to the `config_api_writer` role (`docs/es-lockdown.md`) |
+| You need 'edit' access on index … | Your level on that index is too low | Ask an admin for an index rule |
 | Only the first 10,000 results can be paged through | You paged past Elasticsearch's limit | Add a filter or time range, or change the sort |
 | The API's Elasticsearch account may not read documents | The service account lacks the `read` privilege | Whoever runs the server: add `read` to the `config_api_writer` role (`docs/es-lockdown.md`) |
 | Can't connect (adding or editing a cluster) | Wrong URL, port, password or CA certificate, or the security group blocks the API server | Fix the setting the message names and **Test connection** again |
@@ -421,6 +517,7 @@ A red box always means nothing was changed; its last line shows the error code a
 - Read the whole dry-run table before applying, not just the green banner
 - Write reasons a colleague will understand in six months: what and why, with a ticket number if there is one
 - Change one thing at a time; it keeps rollback simple (there is only one level)
+- Narrow a bulk change with filters until the table shows only the documents you mean, and read the dry-run examples before confirming
 - Keep index-delete and ILM allowlist patterns as narrow as possible
 - Don't change configuration directly in Elasticsearch; it causes drift and blocks rollbacks
 
@@ -434,7 +531,9 @@ A red box always means nothing was changed; its last line shows the error code a
 - **Who can see my changes?** Admins, in the audit log, with your email, time, reason and diff.
 - **Do I need to sign out when an admin changes my access?** No, it applies to your next click.
 - **Can scripts do the same things?** Yes, through the API with a token from sign-in; see [API_REFERENCE.md](API_REFERENCE.md).
-- **Can I change a document in Data?** No, it's read-only. Changes to data go through your applications.
+- **Can I change a document in Data?** Yes, with Edit access on its index: open it and **Edit**. Every change keeps the previous version under **History**.
+- **Can I undo a bulk change?** Yes: **Bulk → Bulk changes and undo… → Restore…**. Every document is put back as it was.
+- **Why can't I see an index my colleague sees?** Your access may be limited to some indices; ask an admin.
 - **Why don't I see `.kibana` or other dot indices in Data?** System indices are never shown, on purpose.
 - **How do I add a new Elasticsearch cluster?** Admins: **Administration → Clusters → Add cluster**; then give people access on **Users**.
 - **Is there SSO?** Not yet; sign-in is by email and password.

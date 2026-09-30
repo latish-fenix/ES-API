@@ -20,6 +20,13 @@ class Settings:
     s3_sse: str | None = None                 # "aws:kms" / "AES256"; unset = bucket default
     local_store_dir: str = "./.local-store"
 
+    # Secrets: AWS Secrets Manager ("aws", production) or local files ("local", dev/tests)
+    secrets_backend: str = "aws"
+    secrets_prefix: str = "es-config-api/"
+    secrets_kms_key_id: str | None = None     # optional customer-managed KMS key for new secrets
+    secrets_endpoint_url: str | None = None   # e.g. a VPC endpoint URL; normally unset
+    local_secrets_dir: str = "./.local-secrets"
+
     # Clusters
     clusters_file: str = "/app/config/clusters.yaml"
     # Clusters added through the API/UI are written here (on the server, never to S3).
@@ -47,8 +54,17 @@ class Settings:
         prefix = env("S3_PREFIX", "es-config-api/")
         if prefix and not prefix.endswith("/"):
             prefix += "/"
+        storage = env("STORAGE_BACKEND", "s3").lower()
+        sprefix = env("SECRETS_PREFIX", "es-config-api/")
+        if sprefix and not sprefix.endswith("/"):
+            sprefix += "/"
         return cls(
-            storage_backend=env("STORAGE_BACKEND", "s3").lower(),
+            storage_backend=storage,
+            secrets_backend=env("SECRETS_BACKEND", "aws" if storage == "s3" else "local").lower(),
+            secrets_prefix=sprefix,
+            secrets_kms_key_id=env("SECRETS_KMS_KEY_ID") or None,
+            secrets_endpoint_url=env("SECRETS_ENDPOINT_URL") or None,
+            local_secrets_dir=env("LOCAL_SECRETS_DIR", "./.local-secrets"),
             s3_bucket=env("S3_BUCKET", ""),
             s3_prefix=prefix,
             aws_region=env("AWS_REGION") or env("AWS_DEFAULT_REGION"),
@@ -77,6 +93,5 @@ class Settings:
             raise ValueError("S3_BUCKET is required when STORAGE_BACKEND=s3")
         if self.auth_mode not in ("password", "header"):
             raise ValueError("AUTH_MODE must be 'password' or 'header'")
-        if self.auth_mode == "password" and len(self.session_secret) < 32:
-            raise ValueError("SESSION_SECRET must be set to a random string of 32+ characters "
-                             "(e.g. `openssl rand -hex 32`)")
+        if self.secrets_backend not in ("aws", "local"):
+            raise ValueError("SECRETS_BACKEND must be 'aws' (AWS Secrets Manager) or 'local' (dev only)")

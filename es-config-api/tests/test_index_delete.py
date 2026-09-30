@@ -82,7 +82,7 @@ def test_delete_needs_delete_level_and_allowlist(client, es, prefix):
     assert r.status_code == 403 and r.json()["error"]["code"] == "PERMISSION_DENIED"
 
     # delete level also includes view and edit
-    assert client.get(f"{API}/cluster-settings", headers=as_user("del")).status_code == 200
+    assert client.get(f"{API}/indices/{idx}/settings", headers=as_user("del")).status_code == 200
 
     # no index-delete entry -> everything blocked
     client.put("/api/v1/admin/allowlist", headers=ROOT, json={"cluster-settings": {"allow": ["*"]}})

@@ -19,19 +19,21 @@ PUT _security/role/config_api_writer
   "indices": [
     {
       "names": ["*"],
-      "privileges": ["monitor", "view_index_metadata", "manage", "read"],
+      "privileges": ["monitor", "view_index_metadata", "manage", "read", "write"],
       "allow_restricted_indices": false
     }
   ]
 }
 ```
 
-`manage` on the cluster is what `PUT _cluster/settings` requires. `read` on indices is what the
-console's **Data** browser needs to search documents; without it searches fail with
-`ES_READ_NOT_ALLOWED` (everything else still works). `allow_restricted_indices: false` keeps
+`manage` on the cluster is what `PUT _cluster/settings` requires. On indices, `read` is what
+the console's **Data** browser needs to search documents (`ES_READ_NOT_ALLOWED` without it),
+and `write` is what document edits, deletes and bulk changes need (`ES_WRITE_NOT_ALLOWED`
+without it). Who may use them is decided per user and per index in the API; this role only
+has to allow the API itself. `allow_restricted_indices: false` keeps
 system indices out of reach, and the API refuses dot indices on top of that.
 
-**Already created the role?** Run the `PUT` above again with `"read"` added; it updates the
+**Already created the role?** Run the `PUT` above again with `"read"` and `"write"` added; it updates the
 role in place and takes effect immediately, no restart. If you only want the
 API to touch some indices, narrow `names` (for example `["logs-*", "products-*"]`); the
 API's allowlist is a second, independent filter on top.
@@ -39,7 +41,7 @@ API's allowlist is a second, independent filter on top.
 ## 2. The service account itself
 
 ```http
-POST _security/user/config_api
+POST _security/user/es_console_api
 {
   "password": "<long random password>",
   "roles": ["config_api_writer"],

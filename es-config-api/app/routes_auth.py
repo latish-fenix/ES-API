@@ -73,7 +73,7 @@ def login(body: LoginBody, request: Request, response: Response):
                        f"Too many failed sign-ins. Try again in {minutes} minute(s) or ask an admin "
                        "to reset your password", {"retryAfterMinutes": minutes})
 
-    ok = verify_password(body.password, (rec or {}).get("passwordHash"))
+    ok = verify_password(body.password, users.password_hash(username) if rec else None)
     if not ok:
         state = users.record_login(username, False, s.lockout_attempts, s.lockout_minutes) \
             if rec else {"locked": False}
@@ -117,7 +117,7 @@ def change_password(body: ChangePasswordBody, request: Request, response: Respon
     _require_password_mode(request)
     users = request.app.state.users
     rec = users.get_auth(user.username)
-    if not verify_password(body.currentPassword, rec.get("passwordHash")):
+    if not verify_password(body.currentPassword, users.password_hash(user.username)):
         _audit(request, "AUTH_PASSWORD_CHANGE", user.username, "REJECTED",
                error={"code": "INVALID_CREDENTIALS"})
         raise ApiError(401, "INVALID_CREDENTIALS", "Current password is wrong")

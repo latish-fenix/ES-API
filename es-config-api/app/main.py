@@ -1,7 +1,10 @@
 """FastAPI entry point: `uvicorn app.main:create_app --factory`."""
 from __future__ import annotations
 
+import dataclasses
 import logging
+import os
+import time
 import uuid
 from pathlib import Path
 
@@ -10,12 +13,14 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 
 from . import routes_admin, routes_auth, routes_clusters, routes_config, routes_data
-from .auth import hash_password, password_problems
+from .auth import generate_password, hash_password, password_problems
 from .clusters import ClusterRegistry, load_clusters
 from .errors import ApiError
 from .data_browser import DataBrowser
+from .data_edit import DataEditor
 from .index_delete import IndexDeleteService
 from .repos import AllowlistRepo, AuditRepo, LockRepo, SnapshotRepo, UsersRepo
+from .secret_store import SecretStore, build_secret_store, resolve_app_secrets
 from .service import ChangeService
 from .settings import Settings
 from .storage import ObjectStore, build_store
@@ -24,13 +29,51 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 
 
 def create_app(settings: Settings | None = None, store: ObjectStore | None = None,
-               registry: ClusterRegistry | None = None) -> FastAPI:
+               registry: ClusterRegistry | None = None, secrets: SecretStore | None = None) -> FastAPI:
     settings = settings or Settings.from_env()
     if store is None:
         settings.validate()
         store = build_store(settings)
-    registry = registry or ClusterRegistry(load_clusters(settings.clusters_file),
-                                           settings.managed_clusters_file or None)
+    secrets = secrets or build_secret_store(settings)
+    # Several API workers start at the same moment. On a fresh install each would otherwise
+    # generate its own session key and first-admin password; one lock in S3 lets the first
+    # worker create them and the others read them.
+    locks = LockRepo(store, STARTUP_LOCK_SECONDS)
+    token = _acquire_startup_lock(locks)
+    try:
+        return _create_app(settings, store, registry, secrets)
+    finally:
+        locks.release(*STARTUP_LOCK, token)
+
+
+STARTUP_LOCK = ("_app", "startup", "init")
+STARTUP_LOCK_SECONDS = 120
+
+
+def _acquire_startup_lock(locks: LockRepo, wait_seconds: float = 90) -> str:
+    deadline = time.monotonic() + wait_seconds
+    while True:
+        try:
+            return locks.acquire(*STARTUP_LOCK, f"api worker {os.getpid()}")
+        except ApiError as e:
+            if e.code != "CHANGE_IN_PROGRESS" or time.monotonic() > deadline:
+                raise
+            time.sleep(0.5)
+
+
+def _create_app(settings: Settings, store: ObjectStore, registry: ClusterRegistry | None,
+                secrets: SecretStore) -> FastAPI:
+    bootstrap_pw = settings.bootstrap_admin_password
+    if settings.auth_mode == "password":
+        session_secret, bootstrap_pw = resolve_app_secrets(
+            secrets, settings.session_secret, settings.bootstrap_admin_password,
+            need_bootstrap_password=bool(settings.bootstrap_admins))
+        settings = dataclasses.replace(settings, session_secret=session_secret)
+    if registry is None:
+        registry = ClusterRegistry(load_clusters(settings.clusters_file, secrets),
+                                   settings.managed_clusters_file or None, secrets)
+    elif registry.secrets is None:
+        registry.attach_secrets(secrets)
 
     app = FastAPI(
         title="ES Config API",
@@ -43,8 +86,13 @@ def create_app(settings: Settings | None = None, store: ObjectStore | None = Non
                     + " The web console is at [/ui/](/ui/).",
     )
     app.state.settings = settings
+    app.state.secrets = secrets
     app.state.registry = registry
-    app.state.users = UsersRepo(store, settings.bootstrap_admins)
+    app.state.users = UsersRepo(store, settings.bootstrap_admins, secrets)
+    moved = app.state.users.migrate_hashes()
+    if moved:
+        log.warning("Moved %d password hash(es) from state/users.json into %s", len(moved),
+                    "AWS Secrets Manager" if secrets.backend == "aws" else "the local secret store")
     app.state.allowlist = AllowlistRepo(store)
     app.state.audit = AuditRepo(store)
     locks = LockRepo(store, settings.lock_ttl_seconds)
@@ -52,10 +100,11 @@ def create_app(settings: Settings | None = None, store: ObjectStore | None = Non
         registry, SnapshotRepo(store), locks, app.state.allowlist, app.state.audit,
     )
     app.state.data = DataBrowser(registry, app.state.audit)
+    app.state.data_edit = DataEditor(registry, store, app.state.audit, settings.session_secret)
     app.state.index_delete = IndexDeleteService(registry, store, locks, app.state.allowlist,
                                                 app.state.audit)
     if settings.auth_mode == "password":
-        _bootstrap_passwords(settings, app.state.users)
+        _bootstrap_passwords(settings, app.state.users, bootstrap_pw, secrets)
 
     @app.middleware("http")
     async def request_id(request: Request, call_next):
@@ -96,21 +145,29 @@ def create_app(settings: Settings | None = None, store: ObjectStore | None = Non
 log = logging.getLogger("es_config_api")
 
 
-def _bootstrap_passwords(settings: Settings, users: UsersRepo) -> None:
-    """Give each BOOTSTRAP_ADMINS user BOOTSTRAP_ADMIN_PASSWORD, once (if they have none yet)."""
+def _bootstrap_passwords(settings: Settings, users: UsersRepo, pw: str | None,
+                         secrets: SecretStore) -> None:
+    """Give each BOOTSTRAP_ADMINS user the first-admin password, once (if they have none yet).
+
+    The password comes from the app secret (field bootstrapAdminPassword); if neither it nor
+    BOOTSTRAP_ADMIN_PASSWORD is set, one is generated and stored there for an admin to read."""
     for name in settings.bootstrap_admins:
         rec = users.get_auth(name)
-        if rec and rec.get("passwordHash"):
+        if rec and rec.get("hasPassword"):
             continue
-        pw = settings.bootstrap_admin_password
         if not pw:
-            raise RuntimeError(f"Bootstrap admin '{name}' has no password yet: set "
-                               "BOOTSTRAP_ADMIN_PASSWORD in .env (used only until they change it)")
+            pw = generate_password()
+            doc = dict(secrets.get("app") or {})
+            doc["bootstrapAdminPassword"] = pw
+            secrets.put("app", doc)
+            log.warning("Generated the first-admin password; read it from %sapp "
+                        "(field bootstrapAdminPassword) and change it after signing in",
+                        secrets.full_name(""))
         problems = password_problems(pw, name)
         if problems:
             raise RuntimeError("BOOTSTRAP_ADMIN_PASSWORD " + "; ".join(problems))
         users.set_password(name, hash_password(pw), True, "bootstrap")
-        log.warning("Set the initial password for bootstrap admin %s from BOOTSTRAP_ADMIN_PASSWORD", name)
+        log.warning("Set the first-admin password for bootstrap admin %s (sign in and change it)", name)
 
 
 UI_DIR = Path(__file__).parent / "static" / "ui"

@@ -89,6 +89,21 @@ export const get = <T>(path: string, query?: Query) => request<T>(path, { query 
 // ------------------------------------------------------------------ types
 
 export type Level = "view" | "edit" | "delete";
+export type RuleLevel = Level | "none";
+
+export interface IndexRule {
+  pattern: string;
+  level: RuleLevel;
+}
+
+/** A user's access on one cluster: a default level plus index-pattern rules. */
+export interface Access {
+  default: Level | null;
+  indices: IndexRule[];
+}
+
+/** As stored/sent: a plain level, or {default, indices}. */
+export type ClusterPermission = Level | { default: Level | null; indices: IndexRule[] };
 
 export interface Me {
   username: string;
@@ -97,6 +112,7 @@ export interface Me {
   usingGeneratedPassword: boolean;
   lastLoginAt: string | null;
   clusters: Record<string, Level>;
+  access: Record<string, Access>;
 }
 
 export interface Cluster {
@@ -104,7 +120,8 @@ export interface Cluster {
   name?: string | null;
   description?: string | null;
   tags?: string[] | Record<string, string> | null;
-  permission: Level;
+  permission: Level | null;
+  indexRules?: boolean;
 }
 
 export interface ConnectionTest {
@@ -132,6 +149,7 @@ export interface AdminCluster extends Partial<ConnectionTest> {
   requestTimeout: number;
   source: "file" | "managed";
   editable: boolean;
+  credentials?: { store: "secrets-manager" | "local-secrets" | "inline" | "none"; secretName?: string; present?: boolean };
   createdAt?: string;
   createdBy?: string;
   updatedAt?: string;
@@ -215,6 +233,49 @@ export interface IndexRow {
   health: string;
   status: string;
   "docs.count": string | null;
+  permission?: Level;
+}
+
+export interface NodeRow {
+  id: string;
+  name: string;
+  ip: string | null;
+  host: string | null;
+  version: string | null;
+  roles: string[];
+  master: boolean;
+  data: boolean;
+  cpuPercent: number | null;
+  load1m: number | null;
+  cpus: number | null;
+  memTotalBytes: number | null;
+  memUsedBytes: number | null;
+  memUsedPercent: number | null;
+  heapUsedBytes: number | null;
+  heapMaxBytes: number | null;
+  heapUsedPercent: number | null;
+  diskTotalBytes: number | null;
+  diskAvailableBytes: number | null;
+  diskUsedPercent: number | null;
+  shards: number | null;
+  uptimeMillis: number | null;
+}
+
+export interface NodeStats {
+  nodes: NodeRow[];
+  summary: {
+    nodes: number;
+    dataNodes: number;
+    diskTotalBytes: number;
+    diskAvailableBytes: number;
+    diskUsedPercent: number | null;
+    cpuPercentAvg: number | null;
+    cpuPercentMax: number | null;
+    memUsedPercentAvg: number | null;
+    heapUsedPercentAvg: number | null;
+    heapUsedPercentMax: number | null;
+  };
+  watermarks: { low: number | null; high: number | null; flood: number | null };
 }
 
 export interface Tombstone {
@@ -249,7 +310,7 @@ export interface UserRec {
   username: string;
   admin: boolean;
   bootstrap: boolean;
-  clusters: Record<string, Level>;
+  clusters: Record<string, ClusterPermission>;
   hasPassword: boolean;
   usingGeneratedPassword: boolean;
   lastLoginAt?: string | null;
@@ -303,6 +364,8 @@ export interface DataField {
 export interface DataFields {
   index: string;
   indices: string[];
+  hiddenIndices: number;
+  editableIndices: string[];
   fields: DataField[];
   nestedPaths: string[];
   dateFields: string[];
@@ -339,6 +402,58 @@ export interface DataHit {
   _id: string;
   _score: number | null;
   _source: Record<string, unknown>;
+  _seq_no?: number;
+  _primary_term?: number;
+  _permission?: Level | null;
+  _dataStream?: string | null;
+}
+
+export interface DocVersion {
+  key: string;
+  action: "UPDATE" | "CREATE" | "DELETE" | "RESTORE";
+  at: string;
+  by: string;
+  reason: string | null;
+  changedFields: string[];
+  changeId: string;
+  before: { exists: boolean; source: Record<string, unknown> | null };
+}
+
+export interface BulkPreview {
+  op: "update" | "delete";
+  index: string;
+  count: number;
+  willChange: number;
+  unchanged: number;
+  skipped: { _index: string; _id: string; reason: string }[];
+  skippedCount: number;
+  indices: string[];
+  warnings: string[];
+  dryRun?: boolean;
+  sample?: { _index: string; _id: string; diff: Diff | null; source: Record<string, unknown> | null }[];
+  dryRunToken?: string;
+  applied?: boolean;
+  changeId?: string;
+  succeeded?: number;
+  conflicts?: number;
+  failed?: number;
+  errors?: { _index: string; _id: string; error: string }[];
+}
+
+export interface BulkChange {
+  changeId: string;
+  op: "update" | "delete" | "restore";
+  index: string;
+  at: string;
+  by: string;
+  reason: string;
+  count: number;
+  fields: { set: string[]; remove: string[] } | null;
+  status: string;
+  result?: { succeeded: number; conflicts: number; failed: number };
+  restoredBy?: string;
+  restoredAt?: string;
+  restoreOf?: string;
 }
 
 export interface DataSearchResult {
@@ -351,6 +466,7 @@ export interface DataSearchResult {
   hits: DataHit[];
   shardFailures?: string[];
   maxWindow: number;
+  hiddenIndices?: number;
 }
 
 /** POST that returns a file (export). Errors come back as the usual ApiError. */

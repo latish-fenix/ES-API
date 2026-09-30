@@ -26,7 +26,7 @@ interface Form {
 }
 
 const EMPTY: Form = {
-  id: "", name: "", description: "", hosts: "", authType: "basic", username: "config_api", password: "",
+  id: "", name: "", description: "", hosts: "", authType: "basic", username: "", password: "",
   apiKey: "", verifyCerts: true, caCertPem: "", removeCa: false, requestTimeout: 30, tags: "",
 };
 
@@ -39,8 +39,10 @@ function fromCluster(c: AdminCluster): Form {
 }
 
 function body(f: Form, editing: AdminCluster | null) {
-  const auth: Record<string, string> = { type: f.authType };
-  if (f.authType === "basic") {
+  // The password is optional: without one (and none saved) the cluster has no authentication.
+  const noPassword = f.authType === "basic" && !f.password && !(editing && editing.authType === "basic");
+  const auth: Record<string, string> = { type: noPassword ? "none" : f.authType };
+  if (f.authType === "basic" && !noPassword) {
     auth.username = f.username.trim();
     if (f.password) auth.password = f.password;
   }
@@ -155,12 +157,24 @@ export function Clusters() {
         )}
       </section>
       <span className="hint">
-        Clusters added here are saved on the API server{q.data?.managedFile ? <> in <code>{q.data.managedFile}</code></> : ""}, not in S3. Passwords and API keys are write-only: they are never shown again.
+        Clusters added here are saved on the API server{q.data?.managedFile ? <> in <code>{q.data.managedFile}</code></> : ""} (connection details only); their passwords and API keys are in AWS Secrets Manager (<code>es-config-api/clusters/&lt;id&gt;</code>). They are write-only: never shown again.
       </span>
       {open?.mode === "add" && <ClusterDialog onClose={() => setOpen(null)} />}
       {open?.mode === "edit" && <ClusterDialog cluster={open.cluster} onClose={() => setOpen(null)} />}
       {open?.mode === "view" && <FileClusterDialog cluster={open.cluster} onClose={() => setOpen(null)} />}
     </Page>
+  );
+}
+
+export function CredText({ c }: { c: AdminCluster }) {
+  const cr = c.credentials;
+  if (!cr || cr.store === "none") return <>Not needed</>;
+  if (cr.store === "inline") return <span style={{ color: "var(--warn)" }}>From .env (copied to Secrets Manager at start; remove it from .env)</span>;
+  return (
+    <>
+      {cr.present ? (cr.store === "secrets-manager" ? "In AWS Secrets Manager" : "In the local secret store") : <span style={{ color: "var(--danger)" }}>Missing: create the secret</span>}
+      {cr.secretName && <> · <span className="mono" style={{ fontSize: 12 }}>{cr.secretName}</span></>}
+    </>
   );
 }
 
@@ -171,6 +185,7 @@ function FileClusterDialog({ cluster: c, onClose }: { cluster: AdminCluster; onC
       <div className="kv">
         <div><span className="k">Name</span><span className="v">{c.name}</span></div>
         <div><span className="k">Authentication</span><span className="v">{c.authType === "basic" ? `User ${c.username}` : c.authType === "api_key" ? "API key" : "None"}</span></div>
+        <div><span className="k">Password</span><span className="v"><CredText c={c} /></span></div>
         <div><span className="k">TLS</span><span className="v">{c.verifyCerts ? "Verified" : "Not verified"}{c.hasCaCert ? " · own CA" : ""}</span></div>
         <div><span className="k">Timeout</span><span className="v">{c.requestTimeout} s</span></div>
       </div>
@@ -197,7 +212,9 @@ function ClusterDialog({ cluster, onClose }: { cluster?: AdminCluster; onClose: 
 
   const idOk = !!editing || ID_RE.test(f.id.trim());
   const hostsOk = f.hosts.split(/[\s,]+/).filter(Boolean).every((h) => /^https?:\/\/[^\s/]+/.test(h)) && f.hosts.trim().length > 0;
-  const authOk = f.authType === "none" || (f.authType === "basic" ? !!f.username.trim() && (!!f.password || !!editing) : !!f.apiKey || !!editing);
+  const keepsPassword = !!editing && editing.authType === "basic";
+  const noPassword = f.authType === "basic" && !f.password && !keepsPassword;
+  const authOk = f.authType === "none" || (f.authType === "basic" ? noPassword || !!f.username.trim() : !!f.apiKey || !!editing);
   const valid = idOk && hostsOk && authOk && f.requestTimeout >= 5 && f.requestTimeout <= 300;
 
   const invalidate = () => {
@@ -237,7 +254,7 @@ function ClusterDialog({ cluster, onClose }: { cluster?: AdminCluster; onClose: 
       wide
       busy={busy}
       title={editing ? <>Edit cluster <span className="mono">{editing.id}</span></> : "Add cluster"}
-      subtitle="The connection is tested before saving. Credentials are stored on the API server only, never in S3."
+      subtitle="The connection is tested before saving. The password or API key is stored in AWS Secrets Manager, never in S3 or on disk."
       onClose={onClose}
       footer={removing ? (
         <>
@@ -288,21 +305,24 @@ function ClusterDialog({ cluster, onClose }: { cluster?: AdminCluster; onClose: 
           <select id={id("auth")} className="select" value={f.authType} onChange={(e) => set("authType", e.target.value as Form["authType"])}>
             <option value="basic">Username and password</option>
             <option value="api_key">API key</option>
-            <option value="none">None (security off)</option>
+            <option value="none">No password (security off)</option>
           </select>
         </div>
         {f.authType === "basic" && (
           <div className="field">
             <label htmlFor={id("user")} className="label">Username</label>
-            <input id={id("user")} className="input mono" value={f.username} autoComplete="off" spellCheck={false} onChange={(e) => set("username", e.target.value)} />
+            <input id={id("user")} className="input mono" value={f.username} placeholder="the cluster's service account" autoComplete="off" spellCheck={false} onChange={(e) => set("username", e.target.value)} />
           </div>
         )}
       </div>
       {f.authType === "basic" && (
         <div className="field">
-          <label htmlFor={id("pw")} className="label">Password</label>
+          <label htmlFor={id("pw")} className="label">Password <span className="hint">· optional</span></label>
           <input id={id("pw")} className="input" type="password" autoComplete="new-password" value={f.password}
             placeholder={editing?.authType === "basic" ? "Leave empty to keep the saved password" : ""} onChange={(e) => set("password", e.target.value)} />
+          <span className="hint">{editing && keepsPassword ? <>Saved: <CredText c={editing} /></>
+            : noPassword ? "No password: the cluster is saved without authentication (for clusters with security turned off)."
+            : "Stored in AWS Secrets Manager as es-config-api/clusters/<id>"}</span>
         </div>
       )}
       {f.authType === "api_key" && (
@@ -312,7 +332,7 @@ function ClusterDialog({ cluster, onClose }: { cluster?: AdminCluster; onClose: 
             placeholder={editing?.authType === "api_key" ? "Leave empty to keep the saved key" : ""} onChange={(e) => set("apiKey", e.target.value)} />
         </div>
       )}
-      <Callout icon="lock">Use a dedicated service account with the <code>config_api_writer</code> role (see <code>docs/es-lockdown.md</code>), not a personal or superuser login.</Callout>
+      {f.authType !== "none" && !noPassword && <Callout icon="lock">Use a dedicated service account with the <code>config_api_writer</code> role (see <code>docs/es-lockdown.md</code>), not a personal or superuser login.</Callout>}
       <details>
         <summary className="label">HTTPS and advanced settings</summary>
         <div className="stack" style={{ marginTop: 12 }}>

@@ -1,14 +1,37 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useId, useMemo, useState } from "react";
-import { ApiError, enc, get, request, type Credential, type Level, type UserRec } from "../../api";
+import { ApiError, enc, get, request, type ClusterPermission, type Credential, type IndexRule, type Level, type RuleLevel, type UserRec } from "../../api";
 import { Icon } from "../../components/icons";
 import { Page } from "../../components/Shell";
 import { Badge, Callout, Dialog, Empty, ErrorCallout, Loading, SearchInput, copyText, downloadFile, useToast } from "../../components/ui";
 import { ago, LEVEL_LABEL, LEVEL_NOTE } from "../../format";
 import { useClusters, useMe } from "../../session";
 
-type Access = Level | "";
+type Pick = Level | "";
+/** Editing shape of one cluster's access. */
+interface Edit { default: Pick; indices: IndexRule[] }
+type AccessMap = Record<string, Edit>;
 const LEVELS: Level[] = ["view", "edit", "delete"];
+
+function toEdit(p: ClusterPermission | undefined): Edit {
+  if (!p) return { default: "", indices: [] };
+  if (typeof p === "string") return { default: p, indices: [] };
+  return { default: p.default ?? "", indices: p.indices.map((r) => ({ ...r })) };
+}
+function toEditMap(m: Record<string, ClusterPermission>): AccessMap {
+  return Object.fromEntries(Object.entries(m).map(([k, v]) => [k, toEdit(v)]));
+}
+/** Back to the API shape: plain level when there are no rules; clusters with no access left out. */
+function clean(m: AccessMap): Record<string, ClusterPermission> {
+  const out: Record<string, ClusterPermission> = {};
+  for (const [k, v] of Object.entries(m)) {
+    const rules = v.indices.map((r) => ({ pattern: r.pattern.trim(), level: r.level })).filter((r) => r.pattern);
+    if (!rules.length) {
+      if (v.default) out[k] = v.default;
+    } else out[k] = { default: v.default || null, indices: rules };
+  }
+  return out;
+}
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 export function csvOf(rows: Credential[]): string {
@@ -19,14 +42,26 @@ export function csvOf(rows: Credential[]): string {
 function passwordStatus(u: UserRec) {
   if (u.lockedUntil && u.lockedUntil * 1000 > Date.now()) return <Badge tone="red" title="Too many failed sign-ins">Locked</Badge>;
   if (!u.hasPassword) return <Badge title="Can't sign in until an admin resets the password">No password</Badge>;
-  if (u.usingGeneratedPassword && u.bootstrap) return <Badge tone="amber" title="Still using BOOTSTRAP_ADMIN_PASSWORD from .env">Initial (.env)</Badge>;
+  if (u.usingGeneratedPassword && u.bootstrap) return <Badge tone="amber" title="Still using the first-admin password (Secrets Manager secret <prefix>app)">Initial</Badge>;
   if (u.usingGeneratedPassword) return <Badge tone="amber" title="Still using the password an admin generated">Generated</Badge>;
   return <Badge tone="green">Set by user</Badge>;
 }
 
-function AccessBadge({ level }: { level?: Level | null }) {
-  if (!level) return <span className="hint">No access</span>;
-  return <Badge tone={level === "delete" ? "red" : level === "edit" ? "blue" : undefined}>{LEVEL_LABEL[level]}</Badge>;
+function AccessBadge({ perm }: { perm?: ClusterPermission | null }) {
+  const e = toEdit(perm ?? undefined);
+  const rules = e.indices.length;
+  if (!e.default && !rules) return <span className="hint">No access</span>;
+  return (
+    <span className="row" style={{ gap: 4, flexWrap: "nowrap" }}>
+      {e.default ? <Badge tone={e.default === "delete" ? "red" : e.default === "edit" ? "blue" : undefined}>{LEVEL_LABEL[e.default]}</Badge> : <span className="hint">Only</span>}
+      {rules > 0 && <Badge title={e.indices.map((r) => `${r.pattern}: ${r.level}`).join("\n")}>+{rules} index rule{rules === 1 ? "" : "s"}</Badge>}
+    </span>
+  );
+}
+
+function permText(p: ClusterPermission): string {
+  const e = toEdit(p);
+  return `${e.default || "no default"}${e.indices.length ? ` +${e.indices.length} rules` : ""}`;
 }
 
 export function Users() {
@@ -49,7 +84,7 @@ export function Users() {
       <div className="page-head" style={{ alignItems: "center" }}>
         <div className="grow">
           <h1>Users &amp; permissions</h1>
-          <span className="sub">Access is set per cluster. Each level includes the ones before it.</span>
+          <span className="sub">Access is set per cluster, and can be narrowed or widened per index with index rules. Each level includes the ones before it.</span>
         </div>
         <button type="button" className="btn btn-primary" onClick={() => setAdding(true)}><Icon name="plus" /> Add users</button>
       </div>
@@ -97,9 +132,9 @@ export function Users() {
                         </span>
                       </td>
                       {columns.length ? columns.map((c) => (
-                        <td key={c} className="nowrap">{u.admin ? <span className="hint">All (admin)</span> : <AccessBadge level={u.clusters[c] ?? u.clusters["*"]} />}</td>
+                        <td key={c} className="nowrap">{u.admin ? <span className="hint">All (admin)</span> : <AccessBadge perm={u.clusters[c] ?? u.clusters["*"]} />}</td>
                       )) : (
-                        <td>{u.admin ? <span className="hint">All (admin)</span> : <span className="hint">{Object.keys(u.clusters).length ? Object.entries(u.clusters).map(([k, v]) => `${k}: ${v}`).join(", ") : "No access"}</span>}</td>
+                        <td>{u.admin ? <span className="hint">All (admin)</span> : <span className="hint">{Object.keys(u.clusters).length ? Object.entries(u.clusters).map(([k, v]) => `${k}: ${permText(v)}`).join(", ") : "No access"}</span>}</td>
                       )}
                       <td>{passwordStatus(u)}</td>
                     </tr>
@@ -118,43 +153,82 @@ export function Users() {
   );
 }
 
-function AccessSelect({ id, value, onChange, disabled }: { id: string; value: Access; onChange: (v: Access) => void; disabled?: boolean }) {
+function AccessSelect({ id, value, onChange, disabled, none = "No access", label }: {
+  id: string; value: string; onChange: (v: string) => void; disabled?: boolean; none?: string; label?: string;
+}) {
   return (
-    <select id={id} className="select" style={{ width: 150 }} value={value} disabled={disabled} onChange={(e) => onChange(e.target.value as Access)}>
-      <option value="">No access</option>
+    <select id={id} className="select" style={{ width: 150 }} value={value} disabled={disabled} aria-label={label} onChange={(e) => onChange(e.target.value)}>
+      <option value="">{none}</option>
       {LEVELS.map((l) => <option key={l} value={l}>{LEVEL_LABEL[l]}</option>)}
     </select>
   );
 }
 
-function ClusterAccess({ value, onChange, disabled }: { value: Record<string, Access>; onChange: (v: Record<string, Access>) => void; disabled?: boolean }) {
-  const clusters = useClusters().data ?? [];
-  const base = useId();
-  const ids = [...clusters.map((c) => c.id), "*"];
+function IndexRules({ id, rules, onChange }: { id: string; rules: IndexRule[]; onChange: (r: IndexRule[]) => void }) {
+  const set = (i: number, patch: Partial<IndexRule>) => onChange(rules.map((r, j) => (j === i ? { ...r, ...patch } : r)));
   return (
-    <div className="stack" style={{ gap: 10 }}>
-      {ids.map((id, i) => (
-        <div key={id} className="row" style={{ flexWrap: "nowrap" }}>
-          <label htmlFor={`${base}-${i}`} className="grow" style={{ fontSize: 14, fontFamily: id === "*" ? undefined : "var(--font-mono)", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>
-            {id === "*" ? <>All clusters <span className="mono hint">*</span></> : id}
-          </label>
-          <AccessSelect id={`${base}-${i}`} value={value[id] ?? ""} disabled={disabled} onChange={(v) => onChange({ ...value, [id]: v })} />
+    <div className="index-rules">
+      {rules.length === 0 && <span className="hint">No index rules: the cluster level applies to every index.</span>}
+      {rules.map((r, i) => (
+        <div key={i} className="row" style={{ gap: 6, flexWrap: "nowrap" }}>
+          <input className="input mono" style={{ minHeight: 34, flex: 1, minWidth: 0 }} value={r.pattern} placeholder="shoppremium*-2024.*"
+            aria-label={`Index pattern ${i + 1} for ${id}`} spellCheck={false} onChange={(e) => set(i, { pattern: e.target.value })} />
+          <select className="select" style={{ width: 118, minHeight: 34 }} value={r.level} aria-label={`Level for pattern ${i + 1} on ${id}`}
+            onChange={(e) => set(i, { level: e.target.value as RuleLevel })}>
+            <option value="none">No access</option>
+            {LEVELS.map((l) => <option key={l} value={l}>{LEVEL_LABEL[l]}</option>)}
+          </select>
+          <button type="button" className="btn btn-ghost mini-btn" aria-label={`Remove pattern ${i + 1}`} onClick={() => onChange(rules.filter((_, j) => j !== i))}><Icon name="x" size={14} /></button>
         </div>
       ))}
+      <div className="row" style={{ gap: 8 }}>
+        <button type="button" className="btn btn-ghost btn-sm" onClick={() => onChange([...rules, { pattern: "", level: "view" }])}><Icon name="plus" size={14} /> Add index rule</button>
+        <span className="hint">Use * as a wildcard. The most specific matching pattern wins; “No access” hides matching indices.</span>
+      </div>
     </div>
   );
 }
 
-const clean = (m: Record<string, Access>) => Object.fromEntries(Object.entries(m).filter(([, v]) => v)) as Record<string, Level>;
+function ClusterAccess({ value, onChange, disabled }: { value: AccessMap; onChange: (v: AccessMap) => void; disabled?: boolean }) {
+  const clusters = useClusters().data ?? [];
+  const base = useId();
+  const ids = [...clusters.map((c) => c.id), "*"];
+  const [open, setOpen] = useState<Record<string, boolean>>(() =>
+    Object.fromEntries(Object.entries(value).filter(([, v]) => v.indices.length).map(([k]) => [k, true])));
+  return (
+    <div className="stack" style={{ gap: 10 }}>
+      {ids.map((id, i) => {
+        const v = value[id] ?? { default: "", indices: [] };
+        const n = v.indices.length;
+        return (
+          <div key={id} className="stack-sm" style={{ gap: 6 }}>
+            <div className="row" style={{ flexWrap: "nowrap" }}>
+              <label htmlFor={`${base}-${i}`} className="grow" style={{ fontSize: 14, fontFamily: id === "*" ? undefined : "var(--font-mono)", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>
+                {id === "*" ? <>All clusters <span className="mono hint">*</span></> : id}
+              </label>
+              <AccessSelect id={`${base}-${i}`} value={v.default} disabled={disabled} none={n ? "Only index rules" : "No access"}
+                onChange={(d) => onChange({ ...value, [id]: { ...v, default: d as Pick } })} />
+              <button type="button" className="btn btn-ghost btn-sm" aria-expanded={!!open[id]} onClick={() => setOpen({ ...open, [id]: !open[id] })}
+                title="Different access for some indices">
+                {n ? `${n} rule${n === 1 ? "" : "s"}` : "Indices"} <Icon name="caret" size={14} style={{ transform: open[id] ? "rotate(180deg)" : undefined }} />
+              </button>
+            </div>
+            {open[id] && <IndexRules id={id} rules={v.indices} onChange={(r) => onChange({ ...value, [id]: { ...v, indices: r } })} />}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
 
 function EditUser({ user, isMe, passwordMode, onClose }: { user: UserRec; isMe: boolean; passwordMode: boolean; onClose: () => void }) {
   const qc = useQueryClient();
   const toast = useToast();
   const [admin, setAdmin] = useState(user.admin);
-  const [access, setAccess] = useState<Record<string, Access>>(user.clusters);
+  const [access, setAccess] = useState<AccessMap>(toEditMap(user.clusters));
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [reset, setReset] = useState(false);
-  useEffect(() => { setAdmin(user.admin); setAccess(user.clusters); }, [user]);
+  useEffect(() => { setAdmin(user.admin); setAccess(toEditMap(user.clusters)); }, [user]);
   const dirty = admin !== user.admin || JSON.stringify(clean(access)) !== JSON.stringify(user.clusters);
 
   const save = useMutation({
@@ -170,7 +244,7 @@ function EditUser({ user, isMe, passwordMode, onClose }: { user: UserRec; isMe: 
   return (
     <aside className="card" aria-label="Edit user">
       <div className="card-head">
-        <div className="grow"><h2>Edit user</h2><span className="hint">Changes are saved to S3 and audited.</span></div>
+        <div className="grow"><h2>Edit user</h2><span className="hint">Saved to S3 and audited; passwords are in Secrets Manager.</span></div>
         <button type="button" className="btn btn-ghost icon-btn" aria-label="Close" onClick={onClose}><Icon name="x" /></button>
       </div>
       <div className="card-body" style={{ gap: 18 }}>
@@ -183,7 +257,7 @@ function EditUser({ user, isMe, passwordMode, onClose }: { user: UserRec; isMe: 
             <div className="stack-sm" style={{ gap: 2 }}>
               <span className="title" style={{ fontSize: 14 }}>Password</span>
               <span>
-                {locked ? "Locked after too many failed sign-ins. A reset unlocks it." : !user.hasPassword ? "No password yet: they can't sign in." : user.usingGeneratedPassword && user.bootstrap ? "Still using the initial password from .env." : user.usingGeneratedPassword ? "Still using the generated password." : "Set by the user."}
+                {locked ? "Locked after too many failed sign-ins. A reset unlocks it." : !user.hasPassword ? "No password yet: they can't sign in." : user.usingGeneratedPassword && user.bootstrap ? "Still using the first-admin password from Secrets Manager." : user.usingGeneratedPassword ? "Still using the generated password." : "Set by the user."}
                 {" "}Last sign-in {ago(user.lastLoginAt)}.
               </span>
             </div>
@@ -216,7 +290,7 @@ function EditUser({ user, isMe, passwordMode, onClose }: { user: UserRec; isMe: 
       <div className="card-foot">
         <button type="button" className="btn btn-ghost danger" style={{ marginRight: "auto" }} disabled={isMe || user.bootstrap || confirmRemove}
           title={isMe ? "You can't remove yourself" : user.bootstrap ? "Bootstrap admins come from .env" : undefined} onClick={() => setConfirmRemove(true)}>Remove user</button>
-        <button type="button" className="btn" disabled={!dirty} onClick={() => { setAdmin(user.admin); setAccess(user.clusters); }}>Cancel</button>
+        <button type="button" className="btn" disabled={!dirty} onClick={() => { setAdmin(user.admin); setAccess(toEditMap(user.clusters)); }}>Cancel</button>
         <button type="button" className="btn btn-primary" disabled={!dirty || save.isPending} onClick={() => save.mutate()}>{save.isPending ? "Saving…" : "Save"}</button>
       </div>
       {reset && <ResetPasswordDialog username={user.username} onClose={() => setReset(false)} />}
@@ -278,7 +352,7 @@ function AddUsersDialog({ onClose }: { onClose: () => void }) {
   const clusters = useClusters().data ?? [];
   const [emails, setEmails] = useState("");
   const [admin, setAdmin] = useState(false);
-  const [access, setAccess] = useState<Record<string, Access>>(clusters.length === 1 ? { [clusters[0].id]: "view" } : {});
+  const [access, setAccess] = useState<AccessMap>(clusters.length === 1 ? { [clusters[0].id]: { default: "view", indices: [] } } : {});
   const [creds, setCreds] = useState<Credential[] | null>(null);
   const [, setCopied] = useState(false);
   const list = useMemo(() => Array.from(new Set(emails.split(/[\s,;]+/).map((e) => e.trim().toLowerCase()).filter(Boolean))), [emails]);

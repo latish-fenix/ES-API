@@ -5,14 +5,14 @@ import { ApiError, enc, get, request, type DeleteResult, type IndexRow, type Rul
 import { Icon } from "../components/icons";
 import { Page, useClusterCrumbs } from "../components/Shell";
 import { Callout, Dialog, Empty, ErrorCallout, HealthDot, Loading, ReasonField, SearchInput, copyText, useToast } from "../components/ui";
-import { bytes, num, pretty, when } from "../format";
+import { bytes, LEVEL_LABEL, num, pretty, when } from "../format";
 import { indexAllowed } from "../glob";
 import { useCluster, useHealth } from "../session";
 
 const MAX_ROWS = 500;
 
 export function Indices() {
-  const { clusterId, can, admin } = useCluster();
+  const { clusterId, canIndex, admin, access } = useCluster();
   const [params, setParams] = useSearchParams();
   const tab = params.get("tab") === "deleted" ? "deleted" : "live";
   const [filter, setFilter] = useState("");
@@ -40,8 +40,9 @@ export function Indices() {
     return (deleted.data ?? []).filter((r) => !f || r.index.toLowerCase().includes(f));
   }, [deleted.data, filter]);
 
-  const canDelete = can("delete");
-  const deletable = (index: string) => canDelete && (!admin || !allow.data || indexAllowed(index, deleteRule));
+  const canDelete = (index: string) => canIndex(index, "delete");
+  const anyDelete = admin || access?.default === "delete" || !!access?.indices.some((r) => r.level === "delete");
+  const deletable = (index: string) => canDelete(index) && (!admin || !allow.data || indexAllowed(index, deleteRule));
 
   return (
     <Page crumbs={useClusterCrumbs(clusterId, { label: "Indices" })} title="Indices" health={health?.status ?? null}>
@@ -65,7 +66,7 @@ export function Indices() {
             ) : (
               <div className="table-scroll" style={{ maxHeight: "calc(100vh - 260px)" }}>
                 <table className="table">
-                  <thead><tr><th>Index</th><th>Health</th><th>Status</th><th className="num">Documents</th><th style={{ textAlign: "right" }}>Actions</th></tr></thead>
+                  <thead><tr><th>Index</th><th>Health</th><th>Status</th><th className="num">Documents</th>{!admin && <th>Your access</th>}<th style={{ textAlign: "right" }}>Actions</th></tr></thead>
                   <tbody>
                     {rows.slice(0, MAX_ROWS).map((r) => (
                       <tr key={r.index}>
@@ -73,11 +74,12 @@ export function Indices() {
                         <td><span className="row" style={{ gap: 6 }}><HealthDot status={r.health} />{r.health ?? "—"}</span></td>
                         <td>{r.status}</td>
                         <td className="num">{num(r["docs.count"])}</td>
+                        {!admin && <td>{r.permission ? <span className="hint">{LEVEL_LABEL[r.permission]}</span> : null}</td>}
                         <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
                           <Link className="btn btn-ghost btn-sm" to={`${c}/data?index=${enc(r.index)}`}>Browse</Link>
                           <Link className="btn btn-ghost btn-sm" to={`${c}/indices/${enc(r.index)}/settings`}>Settings</Link>
                           <Link className="btn btn-ghost btn-sm" to={`${c}/indices/${enc(r.index)}/mapping`}>Mapping</Link>
-                          {canDelete && (deletable(r.index) ? (
+                          {canDelete(r.index) && (deletable(r.index) ? (
                             <button type="button" className="btn btn-ghost btn-sm danger" onClick={() => setToDelete(r.index)}>Delete</button>
                           ) : (
                             <span className="btn btn-ghost btn-sm" style={{ color: "var(--faint)", cursor: "default" }} title="Not on the index-delete allowlist">
@@ -94,9 +96,9 @@ export function Indices() {
           </section>
           {rows.length > MAX_ROWS && <span className="hint">Showing the first {MAX_ROWS} of {num(rows.length)}. Filter to narrow the list.</span>}
           <span className="hint">
-            {canDelete
+            {anyDelete
               ? "Delete is available only for indices on the index-delete allowlist. System (dot) indices are hidden."
-              : "System (dot) indices are hidden."}
+              : "System (dot) indices are hidden."}{access?.indices.length ? " Only indices you have access to are listed." : ""}
           </span>
         </>
       ) : (

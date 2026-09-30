@@ -1,8 +1,11 @@
-"""Read-only data browser: look at the documents in non-system indices.
+"""Data browser: look at the documents in non-system indices (edits: see data_edit.py).
 
-* Anyone with `view` (or more) on a cluster can use it.
+* Index-level access: a search only returns documents from indices the user may view (their
+  cluster default level, or a matching index rule); a pattern that also matches indices they
+  can't see is narrowed to the ones they can.
 * Only non-system indices: no name or pattern starting with '.', wildcards never expand to
-  dot or hidden indices, and hits from a dot index are dropped.
+  dot or hidden indices, and hits from a dot index are dropped (a data stream's backing
+  indices count as the data stream).
 * Every search, document read and export is audited with the query, never the documents.
 * Searches are capped: at most 100 rows a page, 10,000 rows deep (ES's result window), a 30 s
   timeout; exports at most 10,000 rows.
@@ -20,7 +23,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from .clusters import es_call
 from .errors import ApiError, bad_request, forbidden, not_found
-from .identity import User, require_cluster
+from .identity import User, require_any_access
 
 MAX_PAGE = 100
 MAX_WINDOW = 10_000
@@ -231,17 +234,85 @@ def csv_cell(v: Any) -> str:
     return s
 
 
-def _read(es, method: str, path: str, body: Any = None, params: dict | None = None) -> Any:
-    """es_call, with a clear message when the service account lacks the `read` privilege."""
+def _read(es, method: str, path: str, body: Any = None, params: dict | None = None,
+          headers: dict | None = None) -> Any:
+    """es_call, with a clear message when the service account lacks a privilege."""
     try:
-        return es_call(es, method, path, body=body, params=params)
+        return es_call(es, method, path, body=body, params=params, headers=headers)
     except ApiError as e:
         if e.code == "ES_AUTH_FAILED" and (e.details or {}).get("esStatus") == 403:
-            raise ApiError(502, "ES_READ_NOT_ALLOWED",
-                           "The API's Elasticsearch account may not read documents here. Add the "
-                           "'read' index privilege to its role (see docs/es-lockdown.md). "
+            write = method in ("PUT", "DELETE") or path.endswith(("/_bulk", "/_doc", "/_create")) or "/_create/" in path
+            raise ApiError(502, "ES_WRITE_NOT_ALLOWED" if write else "ES_READ_NOT_ALLOWED",
+                           "The API's Elasticsearch account may not "
+                           + ("write documents here. Add the 'write' index privilege" if write else
+                              "read documents here. Add the 'read' index privilege")
+                           + " to its role (see docs/es-lockdown.md). "
                            f"Elasticsearch said: {e.message}", e.details) from e
         raise
+
+
+# ------------------------------------------------------------------ scope
+class Scope:
+    """What a name or pattern resolves to, and which of it the user may use.
+
+    names: concrete index -> the name permissions are checked against (the index itself,
+    or its data stream for a backing index)."""
+
+    def __init__(self, target: str, names: dict[str, str], permitted: set[str]):
+        self.target = target
+        self.names = names
+        self.permitted = permitted
+
+    @property
+    def restricted(self) -> bool:
+        return self.permitted != set(self.names)
+
+    def denied(self) -> list[str]:
+        return sorted({self.names[i] for i in self.names if i not in self.permitted})
+
+    def permission_names(self) -> list[str]:
+        return sorted({self.names[i] for i in self.permitted})
+
+    def narrow(self, query: dict) -> dict:
+        if not self.restricted:
+            return query
+        return {"bool": {"must": [query], "filter": [{"terms": {"_index": sorted(self.permitted)}}]}}
+
+
+def resolve_scope(es, user: User, cluster_id: str, target: str, needed: str,
+                  require_all: bool = False) -> Scope:
+    target = check_target(target)
+    require_any_access(user, cluster_id)
+    try:
+        res = _read(es, "GET", f"/_resolve/index/{_quote(target)}", params={"expand_wildcards": "open"})
+    except ApiError as e:
+        if e.code == "ES_NOT_FOUND":
+            raise not_found("INDEX_NOT_FOUND", f"No index matches '{target}'") from e
+        raise
+    names: dict[str, str] = {}
+    for i in res.get("indices", []):
+        if not i["name"].startswith("."):
+            names[i["name"]] = i["name"]
+    for a in res.get("aliases", []):
+        if not a["name"].startswith("."):
+            for idx in a.get("indices", []):
+                if not idx.startswith("."):
+                    names[idx] = idx
+    for ds in res.get("data_streams", []):
+        if not ds["name"].startswith("."):
+            for b in ds.get("backing_indices", []):
+                names[b] = ds["name"]
+    if not names:
+        raise not_found("INDEX_NOT_FOUND", f"No index matches '{target}'")
+    permitted = {i for i, perm in names.items() if user.can_index(cluster_id, perm, needed)}
+    scope = Scope(target, names, permitted)
+    if not permitted or (require_all and scope.restricted):
+        denied = scope.denied()
+        raise forbidden("PERMISSION_DENIED",
+                        f"'{user.username}' needs '{needed}' access on "
+                        + (f"{len(denied)} of the indices matching '{target}'" if permitted
+                           else f"'{target}'"), {"indices": denied[:50], "needed": needed})
+    return scope
 
 
 # ------------------------------------------------------------------ service
@@ -252,14 +323,12 @@ class DataBrowser:
 
     # -- fields
     def fields(self, user: User, cluster_id: str, target: str) -> dict:
-        require_cluster(user, cluster_id, "view")
         target = check_target(target)
         es = self.registry.client(cluster_id)
-        caps = _read(es, "GET", f"/{_expr(target)}/_field_caps",
+        scope = resolve_scope(es, user, cluster_id, target, "view")
+        caps = _read(es, "POST", f"/{_expr(target)}/_field_caps",
+                     body={"index_filter": {"terms": {"_index": sorted(scope.permitted)}}} if scope.restricted else None,
                      params={"fields": "*", **_search_params()})
-        indices = [i for i in caps.get("indices", []) if not i.startswith(".")]
-        if not indices:
-            raise not_found("INDEX_NOT_FOUND", f"No index matches '{target}'")
         items, nested = [], []
         for name, types in sorted(caps.get("fields", {}).items()):
             if name in _METADATA or name.startswith("_") or any(
@@ -277,7 +346,9 @@ class DataBrowser:
                 "object": t in ("object", "nested"),
                 "metadata": bool(info.get("metadata_field")),
             })
-        return {"clusterId": cluster_id, "index": target, "indices": sorted(indices),
+        writable = [n for n in scope.permission_names() if user.can_index(cluster_id, n, "edit")]
+        return {"clusterId": cluster_id, "index": target, "indices": scope.permission_names(),
+                "hiddenIndices": len(scope.denied()), "editableIndices": writable,
                 "fields": items, "nestedPaths": nested,
                 "dateFields": [f["name"] for f in items if f["type"] in ("date", "date_nanos")]}
 
@@ -305,32 +376,39 @@ class DataBrowser:
         ev.update(extra)
         self.audit.write(ev)
 
-    def _run(self, es, target: str, body: SearchBody, size: int, frm: int) -> dict:
-        req = {"query": build_query(body, self._nested_paths(es, target) if body.filters else ()),
-               "from": frm, "size": size, "track_total_hits": True, "timeout": SEARCH_TIMEOUT}
+    def _run(self, es, scope: Scope, body: SearchBody, size: int, frm: int, **extra) -> dict:
+        query = build_query(body, self._nested_paths(es, scope.target) if body.filters else ())
+        req = {"query": scope.narrow(query), "from": frm, "size": size, "track_total_hits": True,
+               "timeout": SEARCH_TIMEOUT, **extra}
         if body.sort:
             req["sort"] = build_sort(body.sort)
-        return _read(es, "POST", f"/{_expr(target)}/_search", body=req, params=_search_params())
+        return _read(es, "POST", f"/{_expr(scope.target)}/_search", body=req, params=_search_params())
 
     # -- search
     def search(self, user: User, meta, cluster_id: str, target: str, body: SearchBody) -> dict:
         target_in = target
         try:
-            require_cluster(user, cluster_id, "view")
             target = check_target(target)
             if body.from_ + body.size > MAX_WINDOW:
                 raise bad_request("RESULT_WINDOW_EXCEEDED",
                                   f"Only the first {MAX_WINDOW:,} results can be paged through; "
                                   "narrow the search or change the sort")
             es = self.registry.client(cluster_id)
-            r = self._run(es, target, body, body.size, body.from_)
+            scope = resolve_scope(es, user, cluster_id, target, "view")
+            r = self._run(es, scope, body, body.size, body.from_, seq_no_primary_term=True)
         except ApiError as e:
             self._audit("DATA_SEARCH", user, meta, cluster_id, target_in, body,
                         "REJECTED" if e.status < 500 and e.code != "ES_REJECTED" else "FAILED",
                         error={"status": e.status, "code": e.code, "message": e.message})
             raise
         total = r.get("hits", {}).get("total", {}) or {}
-        hits = [_hit(h) for h in r.get("hits", {}).get("hits", []) if not str(h.get("_index", "")).startswith(".")]
+        hits = []
+        for h in r.get("hits", {}).get("hits", []):
+            if h.get("_index") in scope.names:
+                perm = scope.names[h["_index"]]
+                hits.append({**_hit(h), "_seq_no": h.get("_seq_no"), "_primary_term": h.get("_primary_term"),
+                             "_permission": user.index_level(cluster_id, perm),
+                             "_dataStream": perm if perm != h["_index"] else None})
         shards = r.get("_shards", {}) or {}
         out = {
             "clusterId": cluster_id, "index": target,
@@ -338,7 +416,7 @@ class DataBrowser:
             "took": r.get("took"), "timedOut": bool(r.get("timed_out")),
             "from": body.from_, "size": body.size, "hits": hits,
             "shards": {"total": shards.get("total"), "failed": shards.get("failed", 0)},
-            "maxWindow": MAX_WINDOW,
+            "maxWindow": MAX_WINDOW, "hiddenIndices": len(scope.denied()),
         }
         if shards.get("failed"):
             out["shardFailures"] = [
@@ -350,11 +428,11 @@ class DataBrowser:
     # -- one document
     def document(self, user: User, meta, cluster_id: str, index: str, doc_id: str) -> dict:
         try:
-            require_cluster(user, cluster_id, "view")
             index = check_target(index)
             if "*" in index:
                 raise bad_request("INVALID_INDEX_NAME", "Use the document's concrete _index")
             es = self.registry.client(cluster_id)
+            resolve_scope(es, user, cluster_id, index, "view", require_all=True)
             try:
                 r = _read(es, "GET", f"/{index}/_doc/{_quote(doc_id)}")
             except ApiError as e:
@@ -378,18 +456,18 @@ class DataBrowser:
     def export(self, user: User, meta, cluster_id: str, target: str, body: ExportBody) -> tuple[bytes, str, str, int]:
         target_in = target
         try:
-            require_cluster(user, cluster_id, "view")
             target = check_target(target)
             es = self.registry.client(cluster_id)
+            scope = resolve_scope(es, user, cluster_id, target, "view")
             limit = min(body.limit, MAX_EXPORT)
-            r = self._run(es, target, body, limit, 0)
+            r = self._run(es, scope, body, limit, 0)
         except ApiError as e:
             self._audit("DATA_EXPORT", user, meta, cluster_id, target_in, body,
                         "REJECTED" if e.status < 500 and e.code != "ES_REJECTED" else "FAILED",
                         format=body.format,
                         error={"status": e.status, "code": e.code, "message": e.message})
             raise
-        hits = [_hit(h) for h in r.get("hits", {}).get("hits", []) if not str(h.get("_index", "")).startswith(".")]
+        hits = [_hit(h) for h in r.get("hits", {}).get("hits", []) if h.get("_index") in scope.names]
         total = (r.get("hits", {}).get("total") or {}).get("value", len(hits))
         safe = re.sub(r"[^A-Za-z0-9._-]+", "_", target).strip("_") or "export"
         stamp = date.today().isoformat()

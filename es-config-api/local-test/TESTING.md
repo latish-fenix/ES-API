@@ -9,16 +9,25 @@ Open **Command Prompt** in `Desktop\ES-API\es-config-api\local-test` and run:
 
 | Step | Command | What it does |
 | --- | --- | --- |
-| 1 | `1-start-elasticsearch.cmd` | Installs Elasticsearch 8.17.1 into `%USERPROFILE%\es-local` on the first run (a ~480 MB download, checksum verified), starts it in a minimized window, and creates the `config_api` service account, a read-only `reader` user and some demo data |
+| 1 | `1-start-elasticsearch.cmd` | Installs Elasticsearch 8.17.1 into `%USERPROFILE%\es-local` on the first run (a ~480 MB download, checksum verified), starts it in a minimized window, and creates the API's own service account `es_console_api` (no other users; the old demo users `config_api` and `reader` are removed if they exist) and some demo data |
 | 2 | `2-start-api.cmd` | On the first run, creates a Python environment (it installs Python 3.12 with winget if needed), installs the packages and starts the API. Leave this window open; press Ctrl+C to stop |
 
-By default the API stores its state in local JSON files under `local-test\.store`. To use
-S3 instead, run `2-start-api-s3.cmd`. It uses your `fenix-prod` profile and
-`s3://fenix-ecr-logs/cron-migration/`.
+By default the API stores its state in local JSON files under `local-test\.store`, and its
+secrets (session key, password hashes, cluster passwords) as files under `local-test\.secrets`;
+on EC2 both go to S3 and AWS Secrets Manager instead. To use
+S3 instead, run `2-start-api-s3.cmd -Bucket <your-bucket>` (optional: `-Prefix`, default
+`es-config-api-local/`; `-AwsProfile <profile>`; `-Region`, default `us-east-1`).
+
+**No passwords are built in.** The first run generates random passwords for the `elastic`
+superuser, the `es_console_api` service account and your first console sign-in, and keeps them
+in `local-test\.secrets\local-passwords.json` (never committed). An Elasticsearch installed by
+an older version of these scripts keeps its old `elastic` password; for a clean start see
+section 5.
 
 Then open **http://localhost:8080/ui/** and sign in as
-`latish.madapada@fenixcommerce.com` with the password `Local-Test-Admin-2026`. Section 1a
-below is a 15-minute tour of the web console. Sections 2 and 3 test the same things through
+`latish.madapada@fenixcommerce.com` with the first password printed in the `2-start-api`
+window (also the `admin` field of `local-test\.secrets\local-passwords.json`). Section 1a
+below is a 20-minute tour of the web console. Sections 2 and 3 test the same things through
 the raw API at **http://localhost:8080/docs** (click an endpoint, **Try it out**, **Execute**).
 
 ## 1a. Tour of the web console
@@ -40,19 +49,23 @@ the raw API at **http://localhost:8080/docs** (click an endpoint, **Try it out**
 | 11 | As alice: **Change password** (bottom left) | Set a new password | "Password changed" |
 | 12 | Sign in as the admin: **Audit log** | Expand a *Rejected* row | Error code, message, blocked keys, request id |
 | 13 | **Indices** → `products-demo` → **Delete** | Type the name and a reason | The index is gone; see it under "Deleted through the API" |
-| 14 | **Clusters** → **Add cluster** | Id `local-copy`, node URL `http://127.0.0.1:9200`, username `config_api`, password `wrong`; **Test connection** | Red "Can't connect", with the Elasticsearch authentication error |
-| 15 | same | Password `svc-pass-123`, **Test connection**, then **Add cluster** | Green "Connected · Elasticsearch 8.17.1"; the row shows **In console**; `local-copy` is in the cluster switcher; `local-test\clusters.managed.yaml` now holds it (not the `.store` / S3 folder) |
+| 14 | **Clusters** → **Add cluster** | Id `local-copy`, node URL `http://127.0.0.1:9200`, username `es_console_api`, password `wrong`; **Test connection** | Red "Can't connect", with the Elasticsearch authentication error |
+| 15 | same | The `service` password from `local-test\.secrets\local-passwords.json`, **Test connection**, then **Add cluster** | Green "Connected · Elasticsearch 8.17.1"; the row shows **In console**; `local-copy` is in the cluster switcher; `local-test\clusters.managed.yaml` now holds it (not the `.store` / S3 folder) |
 | 16 | same | **Edit** `local-copy`, change the display name, leave the password empty, **Save**; then **Details** on `local` | Saved, still connects (password kept); `local` is read-only ("Defined in config/clusters.yaml") |
 | 17 | same | **Edit** `local-copy` → **Remove cluster**, type `local-copy`, confirm | Gone from the list and the switcher; the audit log shows `ADMIN_CLUSTER_CREATE`, `_UPDATE`, `_DELETE` |
 | 18 | **Data** (or **Indices** → `products-demo` → **Browse**) | Index `products-demo`; query blank, **Search**; click a column heading; **Add filter** on any field; click a row | A document count, sorted rows, the filter as a chip, the document's fields and JSON |
 | 19 | same | **Export** → CSV → **Download**; then type `.security*` as the index and **Search** | A CSV opens in Excel; the system index is refused ("System and hidden indices … can't be browsed"). The audit log shows `DATA_SEARCH` and `DATA_EXPORT` |
+| 20 | **Overview** | Look at **Nodes** | One node with CPU, RAM, JVM heap and disk bars, and the watermarks in the heading |
+| 21 | **Data** → `products-demo` → click a row → **Edit** | Change one value, **Preview changes**, reason, **Save**; then **History** → **Restore the version before** → reason → **Restore** | The diff shows only your field; after the restore the old value is back and History lists both |
+| 22 | same | Search something that matches a few documents; **Bulk → Update matching documents…**, set a field, **Dry run**, reason, type the count, **Update**; then **Bulk → Bulk changes and undo… → Restore…** | The dry run shows the count and examples; after the update and the restore the documents are back as they were |
+| 23 | **Users** → a user → cluster `local` → **Indices** | Set the cluster level to *Only index rules*, add `products-*` → View, **Save**; sign in as that user | They see only `products-*` under Indices and Data, no templates/ILM/pipelines, and no Edit button on documents |
 
-Steps 18–19 need the `config_api` account to have the `read` privilege. If you set up
+Steps 18–22 need the `es_console_api` account to have the `read` and `write` privileges. If you set up
 Elasticsearch before the data browser existed, run `1-start-elasticsearch.cmd` again (it's safe
 to repeat) to update the role.
 
 **Sign in.** In /docs, open `POST /api/v1/auth/login`, click **Try it out**, send
-`{"username": "latish.madapada@fenixcommerce.com", "password": "Local-Test-Admin-2026"}`
+`{"username": "latish.madapada@fenixcommerce.com", "password": "<your password>"}`
 and copy the `token` from the response. Click **Authorize** (top right), paste the token and
 click **Authorize**. To act as another user, sign in as them the same way and paste their token.
 
@@ -106,10 +119,11 @@ Switch to **alice**: sign in as `alice@example.com` with her password from 2.3, 
 
 ### Drift: a change made outside the API
 
-In Command Prompt, change the setting directly as the `elastic` superuser:
+In Command Prompt, change the setting directly as the `elastic` superuser (its password is the
+`elastic` field of `local-test\.secrets\local-passwords.json`):
 
 ```cmd
-curl.exe -u elastic:changeme123 -X PUT http://127.0.0.1:9200/_cluster/settings -H "Content-Type: application/json" -d "{\"persistent\":{\"indices.recovery.max_bytes_per_sec\":\"99mb\"}}"
+curl.exe -u elastic:<elastic password> -X PUT http://127.0.0.1:9200/_cluster/settings -H "Content-Type: application/json" -d "{\"persistent\":{\"indices.recovery.max_bytes_per_sec\":\"99mb\"}}"
 ```
 
 | # | Endpoint | Expect |
@@ -117,14 +131,6 @@ curl.exe -u elastic:changeme123 -X PUT http://127.0.0.1:9200/_cluster/settings -
 | 3.11 | `GET …/cluster-settings` | `"driftDetected": true` |
 | 3.12 | `POST …/cluster-settings/rollback` with `{"reason": "x"}` | 409 `DRIFT_DETECTED` |
 | 3.13 | the same, with `force=true` | 200 |
-
-The read-only `reader` user can't change settings directly:
-
-```cmd
-curl.exe -u reader:reader-pass -X PUT http://127.0.0.1:9200/_cluster/settings -H "Content-Type: application/json" -d "{\"persistent\":{\"indices.recovery.max_bytes_per_sec\":\"10mb\"}}"
-```
-
-This returns `security_exception`, which is how the lockdown is meant to work.
 
 ### Index settings and mappings (`index` = `products-demo`)
 
@@ -169,11 +175,11 @@ With Elasticsearch running (step 1), from the `es-config-api` folder:
 .venv\Scripts\python -m pytest -q
 ```
 
-This runs 57 tests against your local Elasticsearch, with S3 simulated. With the API
+This runs 69 tests against your local Elasticsearch, with S3 simulated. With the API
 running (step 2), you can also run:
 
 ```cmd
-.venv\Scripts\python scripts\smoke_test.py --admin latish.madapada@fenixcommerce.com --admin-password Local-Test-Admin-2026 --cluster local --es-url http://127.0.0.1:9200 --es-password changeme123
+.venv\Scripts\python scripts\smoke_test.py --admin latish.madapada@fenixcommerce.com --admin-password <your password> --cluster local --es-url http://127.0.0.1:9200 --es-password <elastic password>
 ```
 
 The smoke test replaces the allowlist, so repeat step 2.2 afterwards if you want to keep
@@ -183,8 +189,10 @@ testing by hand.
 
 - Stop the API: press Ctrl+C in its window.
 - Stop Elasticsearch: close its window (titled `elasticsearch`).
-- Start fresh: delete `local-test\.store` (the API's state) and `%USERPROFILE%\es-local\data`
-  (the Elasticsearch data; step 1 then recreates the users and demo data).
+- Start fresh (new passwords, no old users or data): close both windows, then delete
+  `local-test\.store` (the API's state), `local-test\.secrets` (passwords and secrets),
+  `local-test\clusters.managed.yaml` and `%USERPROFILE%\es-local` (Elasticsearch, its data and
+  its `elastic` password). Step 1 then installs Elasticsearch again with new random passwords.
 - Remove everything: delete `%USERPROFILE%\es-local` and `es-config-api\.venv`.
 
 ## Troubleshooting

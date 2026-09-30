@@ -4,6 +4,11 @@ import { Link, NavLink, Outlet, useLocation, useNavigate, useParams } from "reac
 import { NAMED_TYPES, request } from "../api";
 import { NAMED_META } from "../format";
 import { lastCluster, rememberCluster, useClusters, useHealth, useMe } from "../session";
+
+function useClusterLevel(clusterId: string | undefined) {
+  const me = useMe().data;
+  return { level: clusterId && me ? (me.admin ? "delete" : me.access?.[clusterId]?.default ?? null) : null };
+}
 import { Icon, type IconName } from "./icons";
 import { HealthDot, HealthPill, usePageTitle } from "./ui";
 
@@ -47,6 +52,7 @@ function ClusterSwitch({ current }: { current: string | undefined }) {
 export function Shell() {
   const me = useMe().data!;
   const params = useParams();
+  const { level } = useClusterLevel(params.clusterId ?? lastCluster() ?? undefined);
   const clusters = useClusters().data;
   const clusterId = params.clusterId ?? lastCluster() ?? clusters?.[0]?.id;
   const qc = useQueryClient();
@@ -85,15 +91,15 @@ export function Shell() {
           <div className="nav-group">
             <span className="nav-label">Configure</span>
             <NavItem to={c} end icon="overview" label="Overview" />
-            <NavItem to={`${c}/cluster-settings`} icon="sliders" label="Cluster settings" />
             <NavItem to={`${c}/indices`} icon="table" label="Indices" />
             <NavItem to={`${c}/data`} icon="database" label="Data" />
-            {NAMED_TYPES.map((t) => <NavItem key={t} to={`${c}/${t}`} icon={NAMED_META[t].icon} label={NAMED_META[t].label} />)}
+            {(me.admin || level) && NAMED_TYPES.map((t) => <NavItem key={t} to={`${c}/${t}`} icon={NAMED_META[t].icon} label={NAMED_META[t].label} />)}
           </div>
         )}
         {me.admin && (
           <div className="nav-group">
             <span className="nav-label">Administration</span>
+            {c && <NavItem to={`${c}/cluster-settings`} icon="sliders" label="Cluster settings" />}
             <NavItem to="/admin/clusters" icon="server" label="Clusters" />
             <NavItem to="/admin/users" icon="users" label="Users" />
             <NavItem to="/admin/allowlist" icon="shield" label="Allowlist" />

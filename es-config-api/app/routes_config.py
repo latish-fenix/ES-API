@@ -69,7 +69,10 @@ def me(request: Request, user: User = Depends(current_user)):
             "authMode": request.app.state.settings.auth_mode,
             "usingGeneratedPassword": rec.get("usingGeneratedPassword", False),
             "lastLoginAt": rec.get("lastLoginAt"),
-            "clusters": {c.id: user.level(c.id) for c in registry.all() if user.level(c.id)}}
+            # cluster-wide level per cluster (templates, ILM, pipelines, indices without a rule)
+            "clusters": {c.id: user.level(c.id) for c in registry.all() if user.level(c.id)},
+            # full access incl. index rules, for every cluster the user can open at all
+            "access": {c.id: user.access(c.id) for c in registry.all() if user.has_any_access(c.id)}}
 
 
 # ------------------------------------------------------------------ clusters
@@ -78,15 +81,20 @@ def list_clusters(request: Request, user: User = Depends(current_user)):
     registry = request.app.state.registry
     items = []
     for c in registry.all():
-        level = user.level(c.id)
-        if level:
-            items.append({**c.public(), "permission": level})
+        if user.has_any_access(c.id):
+            items.append({**c.public(), "permission": user.level(c.id),
+                          "indexRules": user.has_index_rules(c.id)})
     return {"items": items}
 
 
 @router.get("/clusters/{cluster_id}/health", summary="Cluster health")
 def cluster_health(cluster_id: str, request: Request, user: User = Depends(current_user)):
     return svc(request).health(user, cluster_id)
+
+
+@router.get("/clusters/{cluster_id}/nodes", summary="Nodes: CPU, RAM, heap, disk and shards of each node")
+def cluster_nodes(cluster_id: str, request: Request, user: User = Depends(current_user)):
+    return svc(request).nodes(user, cluster_id)
 
 
 # ----------------------------------------------------------- cluster settings
