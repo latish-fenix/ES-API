@@ -1,19 +1,21 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { ApiError, enc, get, request, type DeleteResult, type IndexRow, type Rules, type Tombstone } from "../api";
+import { ApiError, PendingApproval, enc, get, request, type DeleteResult, type IndexRow, type Rules, type Tombstone } from "../api";
 import { Icon } from "../components/icons";
 import { Page, useClusterCrumbs } from "../components/Shell";
-import { Callout, Dialog, Empty, ErrorCallout, HealthDot, Loading, ReasonField, SearchInput, copyText, useToast } from "../components/ui";
+import { applyLabel, Callout, Dialog, Empty, ErrorCallout, HealthDot, Loading, ReasonField, SearchInput, copyText, useToast } from "../components/ui";
 import { bytes, LEVEL_LABEL, num, pretty, when } from "../format";
 import { indexAllowed } from "../glob";
+import { CreateIndexDialog } from "./CreateIndex";
 import { RollbackDialog, type RollbackTarget } from "./Rollback";
-import { useCluster, useHealth } from "../session";
+import { useCluster, useHealth, useNeedsApproval } from "../session";
 
 const MAX_ROWS = 500;
 
 export function Indices() {
-  const { clusterId, canIndex, admin, access } = useCluster();
+  const { clusterId, canIndex, admin, access, can } = useCluster();
+  const [creating, setCreating] = useState(false);
   const [params, setParams] = useSearchParams();
   const tab = params.get("tab") === "deleted" ? "deleted" : "live";
   const [filter, setFilter] = useState("");
@@ -57,6 +59,7 @@ export function Indices() {
           <button type="button" role="tab" className="tab" aria-selected={tab === "deleted"} onClick={() => setParams({ tab: "deleted" })}>Deleted through the API</button>
         </div>
         <div className="grow" />
+        {can("edit") && <button type="button" className="btn btn-primary" onClick={() => setCreating(true)}><Icon name="plus" /> Create index</button>}
         <div style={{ width: 340 }}><SearchInput label="Filter indices" value={filter} onChange={setFilter} placeholder="Filter by name, e.g. delest-log-2026.09" /></div>
       </div>
 
@@ -139,6 +142,7 @@ export function Indices() {
       {toDelete && <DeleteIndexDialog clusterId={clusterId} index={toDelete} onClose={() => setToDelete(null)} />}
       {definition && <DefinitionDialog t={definition} onClose={() => setDefinition(null)} />}
       {recreate && <RollbackDialog target={recreate} onClose={() => setRecreate(null)} />}
+      {creating && <CreateIndexDialog clusterId={clusterId} onClose={() => setCreating(false)} />}
     </Page>
   );
 }
@@ -158,6 +162,7 @@ function DefinitionDialog({ t, onClose }: { t: Tombstone; onClose: () => void })
 }
 
 export function DeleteIndexDialog({ clusterId, index, onClose, onDeleted }: { clusterId: string; index: string; onClose: () => void; onDeleted?: () => void }) {
+  const needsApproval = useNeedsApproval();
   const { admin } = useCluster();
   const qc = useQueryClient();
   const toast = useToast();
@@ -198,8 +203,8 @@ export function DeleteIndexDialog({ clusterId, index, onClose, onDeleted }: { cl
       busy={del.isPending}
       footer={<>
         <button type="button" className="btn" onClick={onClose} disabled={del.isPending}>Cancel</button>
-        <button type="button" className="btn btn-danger" disabled={!ready} onClick={() => del.mutate()}>
-          <Icon name="trash" /> {del.isPending ? "Deleting…" : "Delete index"}
+        <button type="button" className="btn btn-danger" disabled={!ready || del.error instanceof PendingApproval} onClick={() => del.mutate()}>
+          <Icon name="trash" /> {del.isPending ? "Deleting…" : applyLabel(needsApproval, "Delete index")}
         </button>
       </>}
     >

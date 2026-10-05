@@ -12,12 +12,17 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 
-from . import routes_admin, routes_auth, routes_clusters, routes_config, routes_data, routes_history
+from . import (routes_admin, routes_approvals, routes_auth, routes_clusters, routes_config, routes_data,
+               routes_history, routes_shell)
+from .approvals import ApprovalService
+from .shell import Shell
+from .mailer import build_mailer
 from .auth import generate_password, hash_password, password_problems
 from .clusters import ClusterRegistry, load_clusters
 from .errors import ApiError
 from .data_browser import DataBrowser
 from .data_edit import DataEditor
+from .index_create import IndexCreateService
 from .index_delete import IndexDeleteService
 from .repos import AllowlistRepo, AuditRepo, LockRepo, SnapshotRepo, UsersRepo
 from .secret_store import SecretStore, build_secret_store, resolve_app_secrets
@@ -88,6 +93,7 @@ def _create_app(settings: Settings, store: ObjectStore, registry: ClusterRegistr
     app.state.settings = settings
     app.state.secrets = secrets
     app.state.registry = registry
+    app.state.store = store
     app.state.users = UsersRepo(store, settings.bootstrap_admins, secrets)
     moved = app.state.users.migrate_hashes()
     if moved:
@@ -103,6 +109,10 @@ def _create_app(settings: Settings, store: ObjectStore, registry: ClusterRegistr
     app.state.data_edit = DataEditor(registry, store, app.state.audit, settings.session_secret)
     app.state.index_delete = IndexDeleteService(registry, store, locks, app.state.allowlist,
                                                 app.state.audit)
+    app.state.index_create = IndexCreateService(registry, store, app.state.audit)
+    app.state.shell = Shell(app)
+    app.state.approvals = ApprovalService(store, app.state.users, app.state.audit,
+                                          build_mailer(settings), settings)
     if settings.auth_mode == "password":
         _bootstrap_passwords(settings, app.state.users, bootstrap_pw, secrets)
 
@@ -134,8 +144,10 @@ def _create_app(settings: Settings, store: ObjectStore, registry: ClusterRegistr
         return {"status": "ok", "clusters": len(registry.all())}
 
     app.include_router(routes_auth.router)
+    app.include_router(routes_approvals.router)
     app.include_router(routes_data.router)  # before routes_config: its /{type}/{name} paths are generic
     app.include_router(routes_history.router)
+    app.include_router(routes_shell.router)   # before routes_config too
     app.include_router(routes_config.router)
     app.include_router(routes_admin.router)
     app.include_router(routes_clusters.router)

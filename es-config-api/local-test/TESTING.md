@@ -16,7 +16,7 @@ By default the API stores its state in local JSON files under `local-test\.store
 secrets (session key, password hashes, cluster passwords) as files under `local-test\.secrets`;
 on EC2 both go to S3 and AWS Secrets Manager instead. To use
 S3 instead, run `2-start-api-s3.cmd -Bucket <your-bucket>` (optional: `-Prefix`, default
-`es-config-api-local/`; `-AwsProfile <profile>`; `-Region`, default `us-east-1`).
+`es-config-api-local/`; `-AwsProfile <profile>`; `-Region`, default `us-west-2`).
 
 **No passwords are built in.** The first run generates random passwords for the `elastic`
 superuser, the `es_console_api` service account and your first console sign-in, and keeps them
@@ -62,6 +62,14 @@ the raw API at **http://localhost:8080/docs** (click an endpoint, **Try it out**
 | 24 | **Audit log** | Find the ILM policy change from step 7 (or any config change); **Roll back** | A dry run shows the diff back to the state before that change (and a warning if it changed again since); after a reason and **Roll back**, a `RESTORE` row appears and the old row shows **Rolled back** |
 | 25 | **Data** → `products-demo` | Edit a document (step 21), then look at **Recent changes** at the top; **Roll back** the edit | The edit is listed with who, when and why; after the rollback it shows **Rolled back** and the restore is listed too |
 | 26 | **Indices** → **Deleted through the API** | **Recreate** the index deleted in step 13, with a reason | The index is back, empty, with its old mapping; the row says *recreated* and the audit log shows `INDEX_RECREATE` |
+| 27 | **Indices** → **Create index** | Name `products-new`, keep the JSON, **Dry run**, reason, **Create index**; on its page **Roll back creation** | The dry run shows the final settings and mappings; the index is created empty, then deleted again by the roll back (it's listed under *Deleted through the API*) |
+| 28 | **Allowlist**, **Users** → alice | Unlock *Index settings* and add `index.refresh_interval`; give alice *Edit* on cluster `local` (not admin), **Save**; sign in as alice; **Indices** → `products-demo` → **Settings**, dry run `{"index.refresh_interval": "20s"}`, reason, **Request approval** | A blue "Sent to the admins for approval" box; the setting is unchanged; **Requests** shows it *Waiting for approval* (count 1 in the sidebar) |
+| 29 | Sign in as the admin: **Requests** | **Review** → **Check again now** → **Approve and apply** | "Still the same change", then *Approved · applied*; the setting is 20s; alice's **Requests** shows it applied; the audit log has `APPROVAL_REQUESTED`, `APPROVAL_APPROVED` and an `UPDATE` by alice with *approvedBy* = you. Locally no email is sent (the request's History says `MAIL_FROM is not set`) |
+| 30 | As alice, then the admin | alice requests `30s`; before approving, the admin sets `25s` directly on the same page; then **Approve and apply** alice's request | "It changed since the request": nothing applied (still 25s), the request is *Outdated · not applied* |
+| 31 | same | alice requests another change; the admin **Reject**s it with a comment | *Rejected*, with the comment, on alice's request |
+| 32 | **Shell** (as alice) | Path `products-demo/_search`, body `{"size": 0, "aggs": {"by_brand": {"terms": {"field": "brand"}}}}`, **Run**; type `"` in the body to see field suggestions; **Copy as curl** | The aggregation result on the right, status 200; field names suggested; a curl command copied. **History** lists the request |
+| 33 | **Shell** (as the user from step 23) | `GET */_count` | Refused: "needs 'view' access on N of the indices matching '*'" |
+| 34 | **Shell** (as the admin) | `PUT products-demo/_settings` with `{"index": {"refresh_interval": "5s"}}`, **Run**, reason, **Apply change**; then `POST products-demo/_update_by_query` with `{"query": {"match_all": {}}, "set": {"checked": true}}`, **Run**, reason, type the count, **Apply change** | Each shows a dry run first; after applying, the audit log has the change (it can be rolled back there) and the bulk change is under **Data → Bulk changes** |
 
 Steps 18–22 need the `es_console_api` account to have the `read` and `write` privileges. If you set up
 Elasticsearch before the data browser existed, run `1-start-elasticsearch.cmd` again (it's safe
@@ -178,7 +186,7 @@ With Elasticsearch running (step 1), from the `es-config-api` folder:
 .venv\Scripts\python -m pytest -q
 ```
 
-This runs 73 tests against your local Elasticsearch, with S3 simulated. With the API
+This runs 86 tests against your local Elasticsearch, with S3 simulated. With the API
 running (step 2), you can also run:
 
 ```cmd

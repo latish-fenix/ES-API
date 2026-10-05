@@ -9,6 +9,11 @@ export function useMe() {
   return useQuery({ queryKey: ["me"], queryFn: () => get<Me>("/me"), staleTime: 60_000, retry: false });
 }
 
+/** True when this user's changes wait for an admin (non-admins, approvals on). */
+export function useNeedsApproval(): boolean {
+  return !!useMe().data?.approvalsRequired;
+}
+
 export function useClusters() {
   return useQuery({ queryKey: ["clusters"], queryFn: () => get<{ items: Cluster[] }>("/clusters").then((r) => r.items), staleTime: 60_000 });
 }

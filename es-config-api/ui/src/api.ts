@@ -25,6 +25,21 @@ interface RequestOptions {
   headers?: Record<string, string>;
 }
 
+/** A change that was not applied but sent to the admins (HTTP 202). Thrown so a dialog's
+ * "applied" path never runs; ErrorCallout shows it as a notice, not an error. */
+export class PendingApproval extends ApiError {
+  approval: ApprovalRequest;
+  constructor(approval: ApprovalRequest, message: string, requestId: string | null) {
+    super(202, "PENDING_APPROVAL", message, null, requestId);
+    this.approval = approval;
+  }
+}
+
+let onApproval: ((a: ApprovalRequest) => void) | null = null;
+export function setApprovalHandler(fn: (a: ApprovalRequest) => void) {
+  onApproval = fn;
+}
+
 let onUnauthenticated: (() => void) | null = null;
 export function setUnauthenticatedHandler(fn: () => void) {
   onUnauthenticated = fn;
@@ -81,6 +96,11 @@ export async function request<T>(path: string, opts: RequestOptions = {}): Promi
     }
     throw e;
   }
+  const pending = json as { pendingApproval?: boolean; approval?: ApprovalRequest; message?: string } | null;
+  if (res.status === 202 && pending?.pendingApproval && pending.approval) {
+    onApproval?.(pending.approval);
+    throw new PendingApproval(pending.approval, pending.message ?? "Sent to the admins for approval", requestId);
+  }
   return { data: json as T, etag: res.headers.get("etag") };
 }
 
@@ -111,6 +131,7 @@ export interface Me {
   authMode: "password" | "header";
   usingGeneratedPassword: boolean;
   lastLoginAt: string | null;
+  approvalsRequired?: boolean;
   clusters: Record<string, Level>;
   access: Record<string, Access>;
 }
@@ -531,6 +552,38 @@ export async function downloadPost(path: string, body: unknown): Promise<{ blob:
 }
 
 // ------------------------------------------------------------ path helpers
+
+export type ApprovalStatus = "PENDING" | "APPLYING" | "APPLIED" | "FAILED" | "REJECTED" | "CANCELLED" | "EXPIRED" | "OUTDATED";
+
+export interface ApprovalRequest {
+  id: string;
+  status: ApprovalStatus;
+  op: string;
+  kind: "config" | "index" | "doc" | "bulk";
+  label: string;
+  clusterId: string;
+  resource: string;
+  reason: string;
+  requestedBy: string;
+  requestedAt: string;
+  expiresAt: string;
+  summary: { fields?: string[]; fieldCount?: number; count?: number; docs?: number; settings?: string[] };
+  decidedBy?: string;
+  decidedAt?: string;
+  finishedAt?: string;
+  comment?: string;
+  result?: { changeId?: string; applied?: boolean; succeeded?: number; conflicts?: number; failed?: number; index?: string; id?: string };
+  error?: { code: string; message: string; status?: number };
+  canApprove: boolean;
+  canCancel: boolean;
+  // full view only
+  params?: Record<string, unknown>;
+  body?: Record<string, unknown>;
+  preview?: Record<string, unknown>;
+  previewNow?: Record<string, unknown>;
+  events?: { at: string; by: string; event: string; comment?: string }[];
+  mail?: Record<string, { at: string; sent: string[]; failed: { to: string; error: string }[]; skipped?: string }>;
+}
 
 export const NAMED_TYPES = ["index-templates", "component-templates", "ilm-policies", "ingest-pipelines"] as const;
 export type NamedType = (typeof NAMED_TYPES)[number];

@@ -54,6 +54,25 @@ def meta(request: Request) -> RequestMeta:
     return RequestMeta(request_id=request.state.request_id, source_ip=ip)
 
 
+def _update(request, user, cluster_id, config_type, resource, body: "UpdateRequest", dry_run, force, if_match):
+    from .approvals import gate
+    return gate(request, user, "config.update",
+                {"clusterId": cluster_id, "configType": config_type, "resource": resource, "force": force,
+                 "ifMatch": if_match}, body.model_dump(exclude_none=True), dry_run)
+
+
+def _rollback(request, user, cluster_id, config_type, resource, body: "RollbackRequest", dry_run, force, if_match):
+    from .approvals import gate
+    return gate(request, user, "config.rollback",
+                {"clusterId": cluster_id, "configType": config_type, "resource": resource, "force": force,
+                 "ifMatch": if_match}, body.model_dump(exclude_none=True), dry_run)
+
+
+def gate(*a, **k):
+    from .approvals import gate as _g
+    return _g(*a, **k)
+
+
 def _etag(response: Response, body: dict) -> dict:
     if body.get("version"):
         response.headers["ETag"] = f'"{body["version"]}"'
@@ -69,6 +88,8 @@ def me(request: Request, user: User = Depends(current_user)):
             "authMode": request.app.state.settings.auth_mode,
             "usingGeneratedPassword": rec.get("usingGeneratedPassword", False),
             "lastLoginAt": rec.get("lastLoginAt"),
+            # changes by this user wait for an admin's approval
+            "approvalsRequired": request.app.state.approvals.required(user),
             # cluster-wide level per cluster (templates, ILM, pipelines, indices without a rule)
             "clusters": {c.id: user.level(c.id) for c in registry.all() if user.level(c.id)},
             # full access incl. index rules, for every cluster the user can open at all
@@ -109,9 +130,8 @@ def put_cluster_settings(cluster_id: str, request: Request, body: UpdateRequest,
                          dryRun: bool = Query(False), force: bool = Query(False),
                          if_match: str | None = Header(None, alias="If-Match"),
                          user: User = Depends(current_user)):
-    return svc(request).update(user, meta(request), cluster_id, "cluster-settings",
-                               CLUSTER_RESOURCE, body.config, body.reason, body.sampleDocs,
-                               dryRun, force, if_match)
+    return _update(request, user, cluster_id, "cluster-settings", CLUSTER_RESOURCE, body, dryRun, force,
+                   if_match)
 
 
 @router.post("/clusters/{cluster_id}/cluster-settings/rollback", summary="Roll back cluster settings")
@@ -120,8 +140,8 @@ def rollback_cluster_settings(cluster_id: str, request: Request,
                               dryRun: bool = Query(False), force: bool = Query(False),
                               if_match: str | None = Header(None, alias="If-Match"),
                               user: User = Depends(current_user)):
-    return svc(request).rollback(user, meta(request), cluster_id, "cluster-settings",
-                                 CLUSTER_RESOURCE, body.reason, dryRun, force, if_match)
+    return _rollback(request, user, cluster_id, "cluster-settings", CLUSTER_RESOURCE, body, dryRun, force,
+                     if_match)
 
 
 @router.get("/clusters/{cluster_id}/cluster-settings/previous", summary="Stored snapshot")
@@ -147,8 +167,7 @@ def put_index_part(cluster_id: str, index: str, part: IndexPart, request: Reques
                    body: UpdateRequest, dryRun: bool = Query(False), force: bool = Query(False),
                    if_match: str | None = Header(None, alias="If-Match"),
                    user: User = Depends(current_user)):
-    return svc(request).update(user, meta(request), cluster_id, INDEX_PART_TYPE[part], index,
-                               body.config, body.reason, body.sampleDocs, dryRun, force, if_match)
+    return _update(request, user, cluster_id, INDEX_PART_TYPE[part], index, body, dryRun, force, if_match)
 
 
 @router.post("/clusters/{cluster_id}/indices/{index}/{part}/rollback",
@@ -158,8 +177,7 @@ def rollback_index_part(cluster_id: str, index: str, part: IndexPart, request: R
                         dryRun: bool = Query(False), force: bool = Query(False),
                         if_match: str | None = Header(None, alias="If-Match"),
                         user: User = Depends(current_user)):
-    return svc(request).rollback(user, meta(request), cluster_id, INDEX_PART_TYPE[part], index,
-                                 body.reason, dryRun, force, if_match)
+    return _rollback(request, user, cluster_id, INDEX_PART_TYPE[part], index, body, dryRun, force, if_match)
 
 
 @router.get("/clusters/{cluster_id}/indices/{index}/{part}/previous", summary="Stored snapshot")
@@ -175,8 +193,8 @@ def delete_index(cluster_id: str, index: str, request: Request,
                  reason: str | None = Query(None, description="Why; required unless dryRun"),
                  dryRun: bool = Query(False, description="Show what would be deleted"),
                  user: User = Depends(current_user)):
-    return request.app.state.index_delete.delete(user, meta(request), cluster_id, index,
-                                                 confirm, reason, dryRun)
+    return gate(request, user, "index.delete",
+                {"clusterId": cluster_id, "index": index, "confirm": confirm, "reason": reason}, {}, dryRun)
 
 
 @router.get("/clusters/{cluster_id}/deleted-indices",
@@ -204,8 +222,7 @@ def put_named(cluster_id: str, config_type: NamedType, name: str, request: Reque
               body: UpdateRequest, dryRun: bool = Query(False), force: bool = Query(False),
               if_match: str | None = Header(None, alias="If-Match"),
               user: User = Depends(current_user)):
-    return svc(request).update(user, meta(request), cluster_id, config_type.value, name,
-                               body.config, body.reason, body.sampleDocs, dryRun, force, if_match)
+    return _update(request, user, cluster_id, config_type.value, name, body, dryRun, force, if_match)
 
 
 @router.post("/clusters/{cluster_id}/{config_type}/{name}/rollback", summary="Roll back a resource")
@@ -214,8 +231,7 @@ def rollback_named(cluster_id: str, config_type: NamedType, name: str, request: 
                    dryRun: bool = Query(False), force: bool = Query(False),
                    if_match: str | None = Header(None, alias="If-Match"),
                    user: User = Depends(current_user)):
-    return svc(request).rollback(user, meta(request), cluster_id, config_type.value, name,
-                                 body.reason, dryRun, force, if_match)
+    return _rollback(request, user, cluster_id, config_type.value, name, body, dryRun, force, if_match)
 
 
 @router.get("/clusters/{cluster_id}/{config_type}/{name}/previous", summary="Stored snapshot")

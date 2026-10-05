@@ -1,12 +1,12 @@
 # ES Config Console — User Guide
 
-*Last updated 30 September 2026: roll back any change from the audit log, recent changes with roll back on the Data page, recreate deleted indices, optional cluster passwords, index-level access, editing documents with undo, bulk changes, node stats on the Overview, cluster settings under Administration. The same guide, kept in sync, is also a shared Claude Doc.*
+*Last updated 5 October 2026: approvals (non-admins' changes wait for an admin, with email) and the Requests page; the Shell for Elasticsearch requests; create indices; roll back any change from the audit log, recent changes with roll back on the Data page, recreate deleted indices, optional cluster passwords, index-level access, editing documents with undo, bulk changes, node stats on the Overview, cluster settings under Administration. The same guide, kept in sync, is also a shared Claude Doc.*
 
 The ES Config Console is the web page for reading and changing Elasticsearch configuration and documents safely: every change is previewed first, the previous state is saved before it is applied, and everything is written to an audit log.
 
 - **Address:** <http://172.0.58.49/ui/> (the internal network only; `http://172.0.58.49/` opens it too)
 - **Who it's for:** anyone who changes cluster settings, index settings, mappings, templates, ILM policies or ingest pipelines, developers who need to look at the documents in an index, and the admins who manage who may do what
-- **The one rule to remember:** every change goes **Edit → Dry run → Apply**. The dry run shows exactly what would change and touches nothing. Apply saves the current config as a snapshot first, so one click rolls it back
+- **The one rule to remember:** every change goes **Edit → Dry run → Apply**. The dry run shows exactly what would change and touches nothing. Apply saves the current config as a snapshot first, so one click rolls it back. If you are not an admin, Apply becomes **Request approval** and an admin approves it first
 
 What you can see and do depends on your access on each cluster, and sometimes on each index (see [Access levels](#access-levels)). Admins also get Cluster settings and the Clusters, Users, Allowlist and Audit log pages.
 
@@ -54,6 +54,7 @@ Everything happens on one cluster at a time: pick it in the **Cluster** box at t
 ![Overview page](images/02-overview.png)
 
 - **Sidebar, Configure:** Overview, Indices, Data, Index templates, Component templates, ILM policies, Ingest pipelines (the last four only if you have access to the whole cluster)
+- **Sidebar, Changes:** **Requests** (changes waiting for approval; the number shows how many need you) and **Shell** (Elasticsearch requests)
 - **Sidebar, Administration** (admins only): Cluster settings, Clusters, Users, Allowlist, Audit log
 - **Top bar:** where you are (click a part to go back) and the cluster's health (green, yellow or red), refreshed every minute
 - **Overview:** health, number of indices and documents (system indices hidden), your access, the **Nodes** table, and links to each area. Admins also see what the allowlist allows on this cluster and today's activity
@@ -83,7 +84,7 @@ An admin sets your level per cluster. Each level includes the ones above it.
 | Level | You can |
 | --- | --- |
 | View | Read config, health, snapshots and the deleted-index list; search, read and export documents under **Data** |
-| Edit | Also dry run, apply and roll back changes; edit, add and delete single documents; bulk update documents |
+| Edit | Also dry run, apply and roll back changes; edit, add and delete single documents; bulk update documents; with Edit on the whole cluster, create indices |
 | Delete | Also delete indices and bulk delete documents |
 | Admin | Everything on every cluster, including **Cluster settings**, plus Clusters, Users, Allowlist and Audit log |
 
@@ -141,6 +142,19 @@ There is one level of rollback on this button, and it **swaps**: the config you 
 
 **Older changes:** every applied change also keeps the state from just before it, so admins can undo *any* past change, not only the latest, from the audit log (see [Roll back from the audit log](#roll-back-from-the-audit-log)).
 
+### When a change needs an admin's approval
+
+If you are not an admin, your changes are not applied straight away. You still run the dry run and give a reason, but the last button says **Request approval** instead of Apply. Clicking it sends the change to the admins:
+
+![A change sent for approval](images/40-request-approval.png)
+
+- **Nothing changes yet.** The page says *Sent to the admins for approval*, and the request appears under **Requests** in the sidebar (the number shows how many of yours are open).
+- **The admins get an email** with who asked, the cluster, what and why. When one of them approves, the change is applied exactly as you sent it, and **you get an email**. If it is rejected you get the admin's comment.
+- **If something changed meanwhile** (someone edited the same setting or document, or more documents now match a bulk change), the change is *not* applied and the request is marked **Outdated**. Run the dry run again and send a new request.
+- Requests that nobody decides on expire after 7 days. You can cancel your own request while it is waiting.
+
+This covers every change: settings, mappings, templates, ILM policies and pipelines (and rolling them back), creating and deleting indices, and editing, adding, deleting or bulk-changing documents. Dry runs, searches and exports never wait. Admins' own changes apply directly.
+
 ## Cluster settings
 
 **Admins only.** It's under **Administration → Cluster settings** in the sidebar and applies to the cluster picked at the top. This page manages the cluster's **persistent** settings; send only the keys you want to change.
@@ -192,6 +206,21 @@ The Mapping tab lists every field and its type. You can **add** fields, never ch
 3. Tick **I understand this can't be removed or rolled back later**, then **Add fields permanently**.
 
 Changing the type of an existing field is refused ("Mappings can only gain new fields"); that needs a new index and a reindex, outside this console.
+
+### Creating an index
+
+**Create index** (top of the Indices page) is for people with **Edit on the cluster** (and admins). An index rule that limits you on a name (for example `payments-*` → View) also stops you creating an index with that name.
+
+1. Type the name: lowercase letters, digits, `-`, `_`, `+` and `.`, not starting with a dot (those are system indices). The dialog says at once if the name is taken, and which **index template** matches it.
+2. **Settings, mappings and aliases** are filled in from that template (or with 1 shard and 1 replica when none matches). Change what you need. Shards can't be changed later without reindexing, and mappings can only be added to afterwards.
+3. **Dry run** (required). Elasticsearch checks the result, and you see what the index will really get: your settings and mappings combined with the template's (yours win where they differ), plus warnings such as no replicas.
+4. Enter a reason and click **Create index**. You land on the new index's page.
+
+![Create index after the dry run](images/38-create-index.png)
+
+**Undo:** while the new index has **no documents**, its page shows **Created in the console and still empty** with **Roll back creation** (also **Roll back** on its `INDEX_CREATE` row in the audit log). That deletes it again, keeping its settings and mappings under *Deleted through the API* so it can be recreated. Once data has arrived, use **Delete index** with its usual checks.
+
+![A new, empty index with Roll back creation](images/39-create-undo.png)
 
 ### Deleting an index
 
@@ -353,6 +382,71 @@ An ILM policy is a schedule Elasticsearch follows on its own: for example roll o
 - Rolling back restores the policy, **not** the deleted indices
 - So read the dry run's diff line by line, and check which indices use the policy before you apply
 
+## Requests: changes waiting for approval
+
+**Requests** (sidebar, under *Changes*) lists approval requests. The number next to it is what needs you: for an admin, requests waiting for approval; for everyone else, their own open requests.
+
+### Your requests
+
+You see every request you have sent, newest first, with its status. Open one to see the dry run as it was when you sent it, the reason, and what happened (who decided, when, their comment, and the change id once it is applied).
+
+![My requests](images/41-my-requests.png)
+
+| Status | Meaning |
+| --- | --- |
+| Waiting for approval | Sent; no admin has decided yet. **Cancel request** withdraws it |
+| Approved · applied | Done. It is a normal change: it is in the audit log and can be rolled back |
+| Rejected | An admin said no; their comment says why |
+| Outdated · not applied | It changed since you asked; send it again if still needed |
+| Approved · failed | The change itself failed when it ran (the error is shown); nothing was changed unless it says so |
+| Expired / Cancelled | Nobody decided within 7 days / you withdrew it |
+
+### Admins: approve or reject
+
+Every admin gets an email for each new request, with a **Review the request** link. **Waiting for approval** lists them; **All requests** shows every request with filters for status, cluster and requester.
+
+![Waiting for approval](images/42-approval-queue.png)
+
+1. Click **Review**. The page shows who asked, the reason, and the dry run: the same diff, document count or sample the requester saw.
+2. Optional: **Check again now** runs the dry run again, as the requester. *Still the same change* means approving will apply exactly this.
+3. **Approve and apply** (a comment is optional) runs the change as the requester, with the usual snapshot or backup. Or **Reject** with a comment (required); the requester gets it by email.
+
+![Review a request](images/43-review-request.png)
+
+![Approved and applied](images/44-request-applied.png)
+
+You can't approve your own request (another admin has to). If two admins click at the same moment, only one goes through. The audit log records each step (`APPROVAL_REQUESTED`, `APPROVAL_APPROVED`, …), and the change's own audit entry shows who approved it.
+
+## Shell: run Elasticsearch requests
+
+**Shell** (sidebar, under *Changes*) is like Kibana's Dev Tools: type a request, run it, read Elasticsearch's answer. Use it for what the Data page can't do: aggregations, counts, SQL, several searches at once, mappings.
+
+![Shell: an aggregation](images/45-shell-aggregation.png)
+
+1. Pick the method (**GET**, **POST**, **PUT**, **DELETE**) and type the path, for example `shoppremiumoutlets.myshopify.com-shipment_summary-*/_search`. Suggestions appear as you type: your indices, patterns and endpoints such as `_search`, `_count`, `_mapping`, `_cat/indices`. You can also paste a whole Kibana line like `GET my-index/_search`.
+2. Write the JSON body. Field names of that index are suggested as you type, along with query words (`bool`, `term`, `range`, `aggs`…).
+3. **Run** (or Ctrl+Enter). The response shows on the right with its status and time. **Copy as curl** copies the request as a command for scripts.
+
+**Examples** fills in common requests: a terms aggregation, documents per day, a bool query, `_count`, `_msearch`, SQL, the mapping, `_cat/indices`, and the change examples below. **History** keeps your last 50 requests on the cluster (only you see them); click one to load it.
+
+![Field suggestions](images/46-shell-autocomplete.png)
+
+**What you can reach.** Only indices you can view. A pattern that would also match an index hidden from you is refused rather than quietly cut down, so the numbers you see are never partial:
+
+![A pattern that reaches hidden indices](images/47-shell-denied.png)
+
+Scripts (`script`, `script_fields`, `runtime_mappings`) and queries that pull documents from another index (a terms lookup, for example) are for admins only, `size` is at most 10,000, and SQL needs view access on every index of the cluster.
+
+**Changes from the shell.** A write (`PUT my-index/_settings`, `PUT _ilm/policy/…`, `PUT my-index`, `POST my-index/_update/<id>`, `DELETE my-index/_doc/<id>`, `_update_by_query`, `_delete_by_query`…) is never sent to Elasticsearch as typed. **Run** shows its dry run instead, and then asks for a reason (and the typed name or count for deletes and bulk changes). The change then runs through the same flow as on the other pages, so it can be rolled back, and for non-admins it becomes an approval request.
+
+![A change typed in the shell](images/48-shell-change.png)
+
+For `_update_by_query`, give the fields to set or remove instead of a script: `{"query": {...}, "set": {"carrier": "DHL Express"}, "remove": ["old_field"]}`.
+
+![Update by query: dry run](images/49-shell-update-by-query.png)
+
+Not available in the shell: `_reindex`, `_forcemerge`, `_close`/`_open`, snapshots, security, transient cluster settings, and anything else that isn't listed above. The audit log records each shell request with its path and the field names it used, never the values or results.
+
 ## Admins: clusters
 
 Admins add, change and remove Elasticsearch clusters here, without touching the server or restarting anything. **Administration → Clusters** lists every cluster with its nodes and live status.
@@ -487,7 +581,7 @@ The audit log records every change, dry run, rollback, delete, sign-in and admin
 
 ![Audit log with a rejected dry run expanded](images/18-audit-log.png)
 
-- **Filters:** date (UTC), cluster, user, action (UPDATE, ROLLBACK, RESTORE, DRY\_RUN, INDEX\_DELETE, INDEX\_RECREATE, DATA\_SEARCH, DATA\_EXPORT, ADMIN\_\* including ADMIN\_CLUSTER\_\*, AUTH\_\*) and outcome (Success, Rejected, Failed, No change). The filters stay in the address bar, so you can share a filtered view
+- **Filters:** date (UTC), cluster, user, action (UPDATE, ROLLBACK, RESTORE, DRY\_RUN, INDEX\_CREATE, INDEX\_DELETE, INDEX\_RECREATE, DATA\_SEARCH, DATA\_EXPORT, ADMIN\_\* including ADMIN\_CLUSTER\_\*, AUTH\_\*) and outcome (Success, Rejected, Failed, No change). The filters stay in the address bar, so you can share a filtered view
 - **Expand a row** (click it) to see the error code and message, blocked keys, the reason given, the diff of what changed, the change and request IDs, and the source IP
 - **Export JSON** downloads what the filters show
 - The page shows up to 500 events; narrow the filters if there are more
@@ -502,6 +596,7 @@ Every successful change has a **Roll back** button on its row:
 | Document edit, add, delete, restore | Puts that document back as it was before the change |
 | Bulk update, delete or restore | Puts every document of that change back as it was |
 | Index delete | **Recreate**: the index comes back empty, with its settings, mappings and aliases |
+| Index create | Deletes the new index again, only while it has no documents |
 
 Mapping changes have no button: Elasticsearch can't remove fields.
 
@@ -543,6 +638,12 @@ A red box always means nothing was changed; its last line shows the error code a
 | The clusters file on the server can't be written | The server's `data` folder isn't writable by the API | Whoever runs the server: `sudo chown 10001:10001 data && chmod 700 data` |
 | Your session ended | 12 hours passed, or your password was changed or reset | Sign in again |
 | Account locked | 5 wrong passwords | Wait 15 minutes or ask an admin to reset your password |
+| Sent to the admins for approval (blue) | You are not an admin, so the change waits | Nothing to do; you get an email when an admin decides. See **Requests** |
+| It changed since the request (approving) | The resource changed after the request was made, so nothing was applied | The requester runs the dry run again and sends a new request |
+| You can't approve or reject your own request | Admins need another admin for their own requests | Ask another admin |
+| Scripts can't be run from the shell | The body has `script`, `script_fields` or `runtime_mappings` | Use `set` / `remove` for updates, or ask an admin |
+| … can't be run from the shell | That endpoint isn't available (for example `_reindex`, `_forcemerge`) | Use the matching page, or ask an admin |
+| needs 'view' access on N of the indices matching … (shell) | The pattern also matches indices hidden from you | Use a narrower pattern that only covers indices you can see |
 
 ## Good practice and FAQ
 

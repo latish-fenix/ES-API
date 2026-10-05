@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, Request, Response
 
 from .data_browser import ExportBody, SearchBody
 from .identity import User, current_user
-from .routes_config import meta
+from .routes_config import gate, meta
 
 router = APIRouter(prefix="/api/v1/clusters/{cluster_id}/data", tags=["data"])
 
@@ -76,7 +76,8 @@ def bulk_restore(cluster_id: str, change_id: str, request: Request, response: Re
                  body: RestoreBody = RestoreBody(), dryRun: bool = Query(False),
                  user: User = Depends(current_user)):
     response.headers.update(NO_STORE)
-    return _ed(request).restore_bulk(user, meta(request), cluster_id, change_id, body, dryRun)
+    return gate(request, user, "bulk.restore", {"clusterId": cluster_id, "changeId": change_id},
+                body.model_dump(exclude_none=True), dryRun)
 
 
 @router.post("/{index}/_doc", status_code=201, summary="Create a document (edit access; reason required)")
@@ -85,7 +86,8 @@ def create_doc(cluster_id: str, index: str, body: DocCreate, request: Request, r
     response.headers.update(NO_STORE)
     if dryRun:
         response.status_code = 200
-    return _ed(request).create(user, meta(request), cluster_id, index, body, dryRun)
+    return gate(request, user, "doc.create", {"clusterId": cluster_id, "index": index},
+                body.model_dump(exclude_none=True), dryRun)
 
 
 @router.put("/{index}/_doc/{doc_id}", summary="Replace a document (edit access; dry run shows the diff; "
@@ -93,7 +95,8 @@ def create_doc(cluster_id: str, index: str, body: DocCreate, request: Request, r
 def update_doc(cluster_id: str, index: str, doc_id: str, body: DocWrite, request: Request,
                response: Response, dryRun: bool = Query(False), user: User = Depends(current_user)):
     response.headers.update(NO_STORE)
-    return _ed(request).update(user, meta(request), cluster_id, index, doc_id, body, dryRun)
+    return gate(request, user, "doc.update", {"clusterId": cluster_id, "index": index, "id": doc_id},
+                body.model_dump(exclude_none=True), dryRun)
 
 
 @router.delete("/{index}/_doc/{doc_id}", summary="Delete a document (edit access; confirm = the id; kept for undo)")
@@ -101,7 +104,8 @@ def delete_doc(cluster_id: str, index: str, doc_id: str, request: Request, respo
                confirm: str | None = Query(None), reason: str | None = Query(None),
                dryRun: bool = Query(False), user: User = Depends(current_user)):
     response.headers.update(NO_STORE)
-    return _ed(request).delete(user, meta(request), cluster_id, index, doc_id, confirm, reason, dryRun)
+    return gate(request, user, "doc.delete", {"clusterId": cluster_id, "index": index, "id": doc_id,
+                "confirm": confirm, "reason": reason}, {}, dryRun)
 
 
 @router.get("/{index}/_doc/{doc_id}/_history", summary="Saved versions of a document (from edits made here)")
@@ -115,7 +119,8 @@ def doc_history(cluster_id: str, index: str, doc_id: str, request: Request, resp
 def doc_restore(cluster_id: str, index: str, doc_id: str, body: DocRestore, request: Request,
                 response: Response, dryRun: bool = Query(False), user: User = Depends(current_user)):
     response.headers.update(NO_STORE)
-    return _ed(request).restore(user, meta(request), cluster_id, index, doc_id, body, dryRun)
+    return gate(request, user, "doc.restore", {"clusterId": cluster_id, "index": index, "id": doc_id},
+                body.model_dump(exclude_none=True), dryRun)
 
 
 @router.post("/{index}/_bulk_update", summary="Set / remove fields on every matching document "
@@ -123,7 +128,8 @@ def doc_restore(cluster_id: str, index: str, doc_id: str, body: DocRestore, requ
 def bulk_update(cluster_id: str, index: str, body: BulkBody, request: Request, response: Response,
                 dryRun: bool = Query(False), user: User = Depends(current_user)):
     response.headers.update(NO_STORE)
-    return _ed(request).bulk("update", user, meta(request), cluster_id, index, body, dryRun)
+    return gate(request, user, "bulk.update", {"clusterId": cluster_id, "index": index},
+                body.model_dump(exclude_none=True), dryRun)
 
 
 @router.post("/{index}/_bulk_delete", summary="Delete every matching document (delete access; dry run "
@@ -131,4 +137,5 @@ def bulk_update(cluster_id: str, index: str, body: BulkBody, request: Request, r
 def bulk_delete(cluster_id: str, index: str, body: BulkBody, request: Request, response: Response,
                 dryRun: bool = Query(False), user: User = Depends(current_user)):
     response.headers.update(NO_STORE)
-    return _ed(request).bulk("delete", user, meta(request), cluster_id, index, body, dryRun)
+    return gate(request, user, "bulk.delete", {"clusterId": cluster_id, "index": index},
+                body.model_dump(exclude_none=True), dryRun)

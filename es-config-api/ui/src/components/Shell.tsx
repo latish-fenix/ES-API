@@ -1,7 +1,7 @@
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createContext, Fragment, useContext, useEffect, useId, useState, type ReactNode } from "react";
 import { Link, NavLink, Outlet, useLocation, useNavigate, useParams } from "react-router-dom";
-import { NAMED_TYPES, request } from "../api";
+import { NAMED_TYPES, get, request, setApprovalHandler } from "../api";
 import { NAMED_META } from "../format";
 import { lastCluster, rememberCluster, useClusters, useHealth, useMe } from "../session";
 
@@ -10,17 +10,27 @@ function useClusterLevel(clusterId: string | undefined) {
   return { level: clusterId && me ? (me.admin ? "delete" : me.access?.[clusterId]?.default ?? null) : null };
 }
 import { Icon, type IconName } from "./icons";
-import { HealthDot, HealthPill, usePageTitle } from "./ui";
+import { HealthDot, HealthPill, usePageTitle, useToast } from "./ui";
 
 const NavCtx = createContext<() => void>(() => {});
 
-function NavItem({ to, icon, label, end }: { to: string; icon: IconName; label: string; end?: boolean }) {
+function NavItem({ to, icon, label, end, count, countTitle }: { to: string; icon: IconName; label: string; end?: boolean; count?: number; countTitle?: string }) {
   return (
     <NavLink to={to} end={end} className={({ isActive }) => `nav-link ${isActive ? "active" : ""}`}>
       <Icon name={icon} strokeWidth={1.8} />
       <span>{label}</span>
+      {!!count && <span className="nav-count" title={countTitle} aria-label={countTitle}>{count}</span>}
     </NavLink>
   );
+}
+
+export function useApprovalCount() {
+  return useQuery({
+    queryKey: ["approvals", "count"],
+    queryFn: () => get<{ pending: number; mine: number }>("/approvals/_count"),
+    refetchInterval: 60_000,
+    staleTime: 20_000,
+  });
 }
 
 function ClusterSwitch({ current }: { current: string | undefined }) {
@@ -34,7 +44,7 @@ function ClusterSwitch({ current }: { current: string | undefined }) {
 
   const onChange = (next: string) => {
     // Keep the same section (cluster settings, indices…) when switching clusters.
-    const m = location.pathname.match(/^\/c\/[^/]+(\/(cluster-settings|indices|data|index-templates|component-templates|ilm-policies|ingest-pipelines))?/);
+    const m = location.pathname.match(/^\/c\/[^/]+(\/(cluster-settings|indices|data|shell|index-templates|component-templates|ilm-policies|ingest-pipelines))?/);
     navigate(`/c/${encodeURIComponent(next)}${m?.[1] ?? ""}`);
   };
   return (
@@ -60,6 +70,15 @@ export function Shell() {
   const location = useLocation();
   const [navOpen, setNavOpen] = useState(false);
   useEffect(() => setNavOpen(false), [location.pathname]);
+  const toast = useToast();
+  const counts = useApprovalCount().data;
+  useEffect(() => {
+    setApprovalHandler((a) => {
+      toast(`Sent for approval: ${a.label} ${a.resource}. It is applied when an admin approves it.`);
+      qc.invalidateQueries({ queryKey: ["approvals"] });
+    });
+  }, [qc, toast]);
+  const waiting = me.admin ? counts?.pending ?? 0 : counts?.mine ?? 0;
 
   useEffect(() => {
     if (params.clusterId) rememberCluster(params.clusterId);
@@ -96,6 +115,12 @@ export function Shell() {
             {(me.admin || level) && NAMED_TYPES.map((t) => <NavItem key={t} to={`${c}/${t}`} icon={NAMED_META[t].icon} label={NAMED_META[t].label} />)}
           </div>
         )}
+        <div className="nav-group">
+          <span className="nav-label">Changes</span>
+          <NavItem to="/requests" icon="inbox" label="Requests" count={waiting}
+            countTitle={me.admin ? `${waiting} waiting for approval` : `${waiting} of your requests pending`} />
+          {c && <NavItem to={`${c}/shell`} icon="terminal" label="Shell" />}
+        </div>
         {me.admin && (
           <div className="nav-group">
             <span className="nav-label">Administration</span>

@@ -6,10 +6,10 @@ param(
     [string]$Bucket = "",
     [string]$Prefix = "es-config-api-local/",
     [string]$AwsProfile = "",
-    [string]$Region = "us-east-1"
+    [string]$Region = "us-west-2"
 )
 . "$PSScriptRoot\common.ps1"
-if ($S3 -and -not $Bucket) { throw "Give the bucket: 2-start-api-s3.cmd -Bucket <your-bucket> [-Prefix es-config-api-local/] [-AwsProfile <profile>] [-Region us-east-1]" }
+if ($S3 -and -not $Bucket) { throw "Give the bucket: 2-start-api-s3.cmd -Bucket <your-bucket> [-Prefix es-config-api-local/] [-AwsProfile <profile>] [-Region us-west-2]" }
 
 if (-not (Test-EsUp)) { throw "Elasticsearch is not running - run local-test\1-start-elasticsearch.cmd first" }
 

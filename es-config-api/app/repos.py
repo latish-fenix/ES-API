@@ -485,7 +485,9 @@ class AuditRepo:
 
     def write(self, event: dict) -> dict:
         now = utcnow()
-        event = {"eventId": new_id(), "timestamp": iso(now), **event}
+        from .approvals import APPROVAL_CONTEXT   # set while an approved request runs
+        ctx = APPROVAL_CONTEXT.get()
+        event = {"eventId": new_id(), "timestamp": iso(now), **event, **(ctx or {})}
         key = f"audit/{now:%Y/%m/%d}/{now:%Y%m%dT%H%M%S%f}_{event['eventId']}.json"
         event["auditKey"] = key
         log.info(json.dumps(event, default=str))

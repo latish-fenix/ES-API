@@ -9,6 +9,12 @@ Secret names (all under SECRETS_PREFIX, default ``es-config-api/``), each a JSON
 Nothing secret is written to S3, the managed clusters file, .env or the audit log. Reads
 are cached for a few minutes, so a value rotated in the AWS console is picked up without
 a restart; the API's own writes update the cache at once.
+
+Moving regions: with SECRETS_LEGACY_REGION set (for example us-east-1 while SECRETS_REGION
+or AWS_REGION is us-west-2), new secrets are created in the main region, reads fall back to
+the legacy region, and a secret moves the first time it is written: the new value goes to
+the main region and the legacy copy is scheduled for deletion with a 7-day recovery window.
+``python -m app.cli migrate-secrets`` moves the rest in one go.
 """
 from __future__ import annotations
 
@@ -42,6 +48,7 @@ class SecretStore(Protocol):
     def put(self, name: str, value: dict, description: str = "") -> None: ...
     def delete(self, name: str) -> None: ...
     def full_name(self, name: str) -> str: ...
+    def where(self, name: str) -> str | None: ...
 
 
 def _check(name: str) -> str:
@@ -67,49 +74,81 @@ class _Cache:
         with self._lock:
             self._data[key] = (time.monotonic(), value)
 
+    def drop(self, key: str) -> None:
+        with self._lock:
+            self._data.pop(key, None)
+
+
+LEGACY_RECOVERY_DAYS = 7
+
 
 class AwsSecretStore:
     """AWS Secrets Manager. The EC2 instance role needs secretsmanager:GetSecretValue,
-    CreateSecret, PutSecretValue, DeleteSecret, DescribeSecret and TagResource on
-    arn:aws:secretsmanager:<region>:<account>:secret:<prefix>* (see docs/iam-policy.json)."""
+    CreateSecret, PutSecretValue, DeleteSecret, RestoreSecret, DescribeSecret and TagResource on
+    arn:aws:secretsmanager:<region>:<account>:secret:<prefix>* (see docs/iam-policy.json),
+    in the legacy region too while SECRETS_LEGACY_REGION is set."""
 
     backend = "aws"
 
     def __init__(self, prefix: str = "es-config-api/", region: str | None = None,
                  kms_key_id: str | None = None, cache_seconds: float = 300, client=None,
-                 endpoint_url: str | None = None):
+                 endpoint_url: str | None = None, legacy_region: str | None = None,
+                 legacy_client=None):
         self.prefix = prefix
         self.kms_key_id = kms_key_id
+        cfg = Config(retries={"max_attempts": 5, "mode": "standard"})
         self.sm = client or boto3.client(
-            "secretsmanager", region_name=region, endpoint_url=endpoint_url,
-            config=Config(retries={"max_attempts": 5, "mode": "standard"}))
+            "secretsmanager", region_name=region, endpoint_url=endpoint_url, config=cfg)
+        self.region = region or self.sm.meta.region_name
+        self.legacy_region = legacy_region if legacy_region and legacy_region != self.region else None
+        self.legacy = None
+        if self.legacy_region:
+            self.legacy = legacy_client or boto3.client(
+                "secretsmanager", region_name=self.legacy_region, config=cfg)
         self.cache = _Cache(cache_seconds)
+        self._found: dict[str, str] = {}            # full name -> region it was read from
 
     def full_name(self, name: str) -> str:
         return _check(f"{self.prefix}{name}")
+
+    @staticmethod
+    def _read(sm, full: str) -> dict | None:
+        try:
+            resp = sm.get_secret_value(SecretId=full)
+            return json.loads(resp.get("SecretString") or "{}")
+        except ClientError as e:
+            code = e.response["Error"]["Code"]
+            if code == "ResourceNotFoundException":
+                return None
+            if code == "InvalidRequestException" and "delet" in str(e).lower():
+                return None                          # scheduled for deletion: treat as gone
+            raise _aws_error("read", full, e) from e
 
     def get(self, name: str) -> dict | None:
         full = self.full_name(name)
         cached, value = self.cache.get(full)
         if cached:
             return value
-        try:
-            resp = self.sm.get_secret_value(SecretId=full)
-            value = json.loads(resp.get("SecretString") or "{}")
-        except ClientError as e:
-            code = e.response["Error"]["Code"]
-            if code == "ResourceNotFoundException":
-                value = None
-            elif code == "InvalidRequestException" and "deletion" in str(e).lower():
-                value = None
-            else:
-                raise _aws_error("read", full, e) from e
+        value = self._read(self.sm, full)
+        where = self.region if value is not None else None
+        if value is None and self.legacy is not None:
+            value = self._read(self.legacy, full)
+            where = self.legacy_region if value is not None else None
+        if where:
+            self._found[full] = where
+        else:
+            self._found.pop(full, None)
         self.cache.set(full, value)
         return value
 
-    def put(self, name: str, value: dict, description: str = "") -> None:
+    def where(self, name: str) -> str | None:
+        """Region the secret is read from (main region first), or None if it doesn't exist."""
         full = self.full_name(name)
-        body = json.dumps(value, separators=(",", ":"))
+        self.cache.drop(full)
+        self.get(name)
+        return self._found.get(full)
+
+    def _write_main(self, full: str, body: str, description: str) -> None:
         try:
             self.sm.put_secret_value(SecretId=full, SecretString=body)
         except ClientError as e:
@@ -124,7 +163,7 @@ class AwsSecretStore:
                     self.sm.create_secret(**kwargs)
                 except ClientError as e2:
                     raise _aws_error("create", full, e2) from e2
-            elif code == "InvalidRequestException" and "deletion" in str(e).lower():
+            elif code == "InvalidRequestException" and "delet" in str(e).lower():
                 try:
                     self.sm.restore_secret(SecretId=full)
                     self.sm.put_secret_value(SecretId=full, SecretString=body)
@@ -132,16 +171,87 @@ class AwsSecretStore:
                     raise _aws_error("restore", full, e2) from e2
             else:
                 raise _aws_error("write", full, e) from e
+
+    def _retire_legacy(self, full: str) -> bool:
+        """Schedule the legacy-region copy for deletion (recoverable for 7 days).
+        True if a live copy was there."""
+        if self.legacy is None:
+            return False
+        try:
+            self.legacy.delete_secret(SecretId=full, RecoveryWindowInDays=LEGACY_RECOVERY_DAYS)
+            log.warning("Moved secret %s to %s; the %s copy is scheduled for deletion in %d days",
+                        full, self.region, self.legacy_region, LEGACY_RECOVERY_DAYS)
+            return True
+        except ClientError as e:
+            code = e.response["Error"]["Code"]
+            if code == "ResourceNotFoundException":
+                return False
+            if code == "InvalidRequestException" and "delet" in str(e).lower():
+                return False                         # already scheduled
+            raise _aws_error("delete", f"{full} ({self.legacy_region})", e) from e
+
+    def put(self, name: str, value: dict, description: str = "") -> None:
+        full = self.full_name(name)
+        body = json.dumps(value, separators=(",", ":"))
+        self._write_main(full, body, description)
         self.cache.set(full, value)
+        self._found[full] = self.region
+        if self.legacy is not None:
+            try:                      # the new value is stored; retiring the old copy is best effort
+                if self._found_in_legacy(full):
+                    self._retire_legacy(full)
+            except ApiError as e:
+                log.warning("Stored %s in %s, but could not retire the %s copy: %s (migrate-secrets "
+                            "will retry)", full, self.region, self.legacy_region, e.message)
+
+    def _found_in_legacy(self, full: str) -> bool:
+        try:
+            d = self.legacy.describe_secret(SecretId=full)
+            return not d.get("DeletedDate")
+        except ClientError as e:
+            if e.response["Error"]["Code"] == "ResourceNotFoundException":
+                return False
+            raise _aws_error("read", f"{full} ({self.legacy_region})", e) from e
 
     def delete(self, name: str) -> None:
         full = self.full_name(name)
-        try:
-            self.sm.delete_secret(SecretId=full, ForceDeleteWithoutRecovery=True)
-        except ClientError as e:
-            if e.response["Error"]["Code"] != "ResourceNotFoundException":
-                raise _aws_error("delete", full, e) from e
+        for sm, region in ((self.sm, self.region), (self.legacy, self.legacy_region)):
+            if sm is None:
+                continue
+            try:
+                sm.delete_secret(SecretId=full, ForceDeleteWithoutRecovery=True)
+            except ClientError as e:
+                if e.response["Error"]["Code"] != "ResourceNotFoundException":
+                    raise _aws_error("delete", full if sm is self.sm else f"{full} ({region})", e) from e
         self.cache.set(full, None)
+        self._found.pop(full, None)
+
+    def migrate(self, name: str, dry_run: bool = True) -> str:
+        """Move one secret from the legacy region. Returns what happened (or would):
+        'moved', 'retired' (already in the main region; legacy copy scheduled for deletion),
+        'in-main', 'missing'. Values are copied unchanged."""
+        full = self.full_name(name)
+        if self.legacy is None:
+            return "in-main" if self._read(self.sm, full) is not None else "missing"
+        main_v = self._read(self.sm, full)
+        legacy_live = self._found_in_legacy(full)
+        if main_v is not None:
+            if legacy_live and not dry_run:
+                self._retire_legacy(full)
+            return "retired" if legacy_live else "in-main"
+        if not legacy_live:
+            return "missing"
+        if dry_run:
+            return "moved"
+        value = self._read(self.legacy, full)
+        if value is None:
+            return "missing"
+        desc = self.legacy.describe_secret(SecretId=full).get("Description") or "ES Config API"
+        self._write_main(full, json.dumps(value, separators=(",", ":")), desc)
+        self.cache.set(full, value)
+        self._found[full] = self.region
+        self._retire_legacy(full)
+        return "moved"
 
 
 def _aws_error(what: str, name: str, e: ClientError) -> ApiError:
@@ -199,12 +309,19 @@ class LocalSecretStore:
         except FileNotFoundError:
             pass
 
+    def where(self, name: str) -> str | None:
+        return "local" if self._path(self.full_name(name)).exists() else None
+
+    def migrate(self, name: str, dry_run: bool = True) -> str:
+        return "in-main" if self.where(name) else "missing"
+
 
 def build_secret_store(settings) -> SecretStore:
     if settings.secrets_backend == "aws":
-        return AwsSecretStore(settings.secrets_prefix, settings.aws_region,
+        return AwsSecretStore(settings.secrets_prefix, settings.secrets_region or settings.aws_region,
                               settings.secrets_kms_key_id,
-                              endpoint_url=settings.secrets_endpoint_url)
+                              endpoint_url=settings.secrets_endpoint_url,
+                              legacy_region=settings.secrets_legacy_region)
     return LocalSecretStore(settings.local_secrets_dir, settings.secrets_prefix)
 
 

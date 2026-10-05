@@ -3,6 +3,8 @@ import type { SVGProps } from "react";
 
 const P: Record<string, string> = {
   logo: "M5 7h14M5 12h10M5 17h14",
+  inbox: "M3 13l3-8h12l3 8v6H3zM3 13h5l1 3h6l1-3h5",
+  terminal: "M4 4h16v16H4zM8 9l3 3-3 3M13 15h4",
   overview: "M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z",
   sliders: "M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1M15 4v4M9 10v4M17 16v4",
   table: "M4 5h16v14H4zM4 10h16M4 15h16M10 5v14",

@@ -8,7 +8,7 @@ from fastapi import APIRouter, Body, Depends, Header, Query, Request
 from pydantic import BaseModel, Field
 
 from .identity import User, current_user
-from .routes_config import meta, svc
+from .routes_config import gate, meta, svc
 
 router = APIRouter(prefix="/api/v1/clusters/{cluster_id}", tags=["history"])
 
@@ -44,13 +44,52 @@ def restore_config(cluster_id: str, change_id: str, request: Request,
                    force: bool = Query(False, description="Also when cluster health is red"),
                    if_match: str | None = Header(None, alias="If-Match"),
                    user: User = Depends(current_user)):
-    return svc(request).restore(user, meta(request), cluster_id, body.configType, body.resource,
-                                change_id, body.reason, dryRun, force, if_match)
+    return gate(request, user, "config.restore", {"clusterId": cluster_id, "changeId": change_id,
+                "force": force, "ifMatch": if_match}, body.model_dump(exclude_none=True), dryRun)
 
 
 @router.post("/deleted-indices/_recreate",
              summary="Recreate a deleted index, empty, from its saved settings, mappings and aliases")
 def recreate_index(cluster_id: str, request: Request, body: RecreateBody = Body(...),
                    dryRun: bool = Query(False), user: User = Depends(current_user)):
-    return request.app.state.index_delete.recreate(user, meta(request), cluster_id, body.key,
-                                                   body.reason, dryRun)
+    return gate(request, user, "index.recreate", {"clusterId": cluster_id}, body.model_dump(exclude_none=True),
+                dryRun)
+
+
+# ------------------------------------------------------------------ create an index
+from .index_create import CreateIndexBody, UndoCreateBody  # noqa: E402
+
+
+def _create(request: Request):
+    return request.app.state.index_create
+
+
+@router.get("/indices/{index}/_create-preview",
+            summary="What the matching index templates would give a new index of this name")
+def create_preview(cluster_id: str, index: str, request: Request, user: User = Depends(current_user)):
+    return _create(request).preview(user, cluster_id, index)
+
+
+@router.post("/indices/{index}", status_code=200,
+             summary="Create an index (Edit on the cluster; dry run shows the combined result)")
+def create_index(cluster_id: str, index: str, request: Request,
+                 body: CreateIndexBody = Body(default_factory=CreateIndexBody),
+                 dryRun: bool = Query(False, description="Check and show the result; create nothing"),
+                 user: User = Depends(current_user)):
+    return gate(request, user, "index.create", {"clusterId": cluster_id, "index": index},
+                body.model_dump(exclude_none=True), dryRun)
+
+
+@router.get("/indices/{index}/_created",
+            summary="Whether this index was created in the console, and whether that can still be undone")
+def index_created(cluster_id: str, index: str, request: Request, user: User = Depends(current_user)):
+    return _create(request).created(user, cluster_id, index)
+
+
+@router.post("/indices/{index}/_undo-create",
+             summary="Undo a create: deletes the index, only while it holds no documents")
+def undo_create(cluster_id: str, index: str, request: Request,
+                body: UndoCreateBody = Body(default_factory=UndoCreateBody),
+                dryRun: bool = Query(False), user: User = Depends(current_user)):
+    return gate(request, user, "index.undo_create", {"clusterId": cluster_id, "index": index},
+                body.model_dump(exclude_none=True), dryRun)

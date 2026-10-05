@@ -318,6 +318,10 @@ class ClusterRegistry:
                 "store": "secrets-manager" if getattr(self.secrets, "backend", "") == "aws" else "local-secrets",
                 "secretName": self.secrets.full_name(cfg.secret) if self.secrets else cfg.secret,
                 "present": bool(pw or key)}
+            region = getattr(self.secrets, "_found", {}).get(self.secrets.full_name(cfg.secret)) \
+                if self.secrets is not None and (pw or key) else None
+            if region:
+                out["credentials"]["region"] = region
         return out
 
     # -- reading --------------------------------------------------------------

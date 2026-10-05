@@ -1,3 +1,4 @@
+import { autocompletion, type CompletionSource } from "@codemirror/autocomplete";
 import { json, jsonParseLinter } from "@codemirror/lang-json";
 import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { linter, lintGutter } from "@codemirror/lint";
@@ -27,17 +28,22 @@ const highlight = HighlightStyle.define([
   { tag: t.invalid, color: "var(--danger)" },
 ]);
 
-export function JsonEditor({ value, onChange, height = "280px", readOnly, label }: {
+export function JsonEditor({ value, onChange, height = "280px", readOnly, label, completions, lint = true, extraKeys }: {
   value: string;
   onChange?: (v: string) => void;
   height?: string;
   readOnly?: boolean;
   label: string;
+  completions?: CompletionSource;
+  lint?: boolean;
+  extraKeys?: Parameters<typeof EditorView.domEventHandlers>[0];
 }) {
   const extensions = useMemo(
-    () => [json(), linter(jsonParseLinter(), { delay: 300 }), lintGutter(), theme, syntaxHighlighting(highlight),
-      EditorView.contentAttributes.of({ "aria-label": label }), EditorView.lineWrapping],
-    [label],
+    () => [json(), ...(lint ? [linter(jsonParseLinter(), { delay: 300 }), lintGutter()] : []), theme, syntaxHighlighting(highlight),
+      EditorView.contentAttributes.of({ "aria-label": label }), EditorView.lineWrapping,
+      ...(completions ? [autocompletion({ override: [completions], activateOnTyping: true })] : []),
+      ...(extraKeys ? [EditorView.domEventHandlers(extraKeys)] : [])],
+    [label, completions, lint, extraKeys],
   );
   return (
     <div className="editor">

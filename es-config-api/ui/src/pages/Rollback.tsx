@@ -4,10 +4,11 @@
 // can be rolled back again.
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import { ApiError, enc, get, request, type AuditEvent, type ChangeResult, type Diff, type RecentChange, type RecreatePlan } from "../api";
+import { ApiError, PendingApproval, enc, get, request, type AuditEvent, type ChangeResult, type Diff, type RecentChange, type RecreatePlan } from "../api";
 import { DiffTable } from "../components/DiffTable";
 import { Icon } from "../components/icons";
-import { Badge, Callout, Dialog, ErrorCallout, Loading, ReasonField, Spinner, useToast } from "../components/ui";
+import { applyLabel, Badge, Callout, Dialog, ErrorCallout, Loading, ReasonField, Spinner, useToast } from "../components/ui";
+import { useNeedsApproval } from "../session";
 import { CONFIG_TYPE_LABEL, num, when } from "../format";
 
 /** `detail` = who made the change, when and why (shown in the dialog). */
@@ -15,7 +16,8 @@ export type RollbackTarget = { detail?: string } & (
   | { kind: "config"; clusterId: string; configType: string; resource: string; changeId: string; label: string }
   | { kind: "doc"; clusterId: string; index: string; id: string; versionKey: string; label: string }
   | { kind: "bulk"; clusterId: string; changeId: string; label: string }
-  | { kind: "index"; clusterId: string; key: string; index: string; label: string });
+  | { kind: "index"; clusterId: string; key: string; index: string; label: string }
+  | { kind: "create"; clusterId: string; index: string; changeId: string; label: string });
 
 const who = (by: string, at: string, reason?: string | null) => `${by}, ${when(at)}${reason ? ` · “${reason}”` : ""}`;
 
@@ -51,6 +53,9 @@ function auditTarget(e: AuditEvent): RollbackTarget | null {
   if (e.action === "INDEX_DELETE" && s("tombstoneKey") && e.resource) {
     return { kind: "index", clusterId: e.clusterId, key: s("tombstoneKey"), index: e.resource, label: `the delete of index ${e.resource}` };
   }
+  if (e.action === "INDEX_CREATE" && e.resource && e.changeId) {
+    return { kind: "create", clusterId: e.clusterId, index: e.resource, changeId: s("changeId"), label: `the creation of index ${e.resource}` };
+  }
   return null;
 }
 
@@ -74,6 +79,7 @@ function url(t: RollbackTarget): string {
     case "doc": return `${c}/data/${enc(t.index)}/_doc/${enc(t.id)}/_restore`;
     case "bulk": return `${c}/data/_changes/${enc(t.changeId)}/_restore`;
     case "index": return `${c}/deleted-indices/_recreate`;
+    case "create": return `${c}/indices/${enc(t.index)}/_undo-create`;
   }
 }
 
@@ -84,12 +90,14 @@ function body(t: RollbackTarget, reason?: string, extra?: Record<string, unknown
     case "doc": return { versionKey: t.versionKey, ...r };
     case "bulk": return { ...r, ...extra };
     case "index": return { key: t.key, ...r };
+    case "create": return { changeId: t.changeId, ...r };
   }
 }
 
 const emptyDiff = (d?: Diff) => !d || (!d.added.length && !d.removed.length && !d.changed.length);
 
 export function RollbackDialog({ target, onClose, onDone }: { target: RollbackTarget; onClose: () => void; onDone?: () => void }) {
+  const needsApproval = useNeedsApproval();
   const toast = useToast();
   const qc = useQueryClient();
   const [reason, setReason] = useState("");
@@ -107,11 +115,13 @@ export function RollbackDialog({ target, onClose, onDone }: { target: RollbackTa
       body: body(target, reason, target.kind === "bulk" ? { dryRunToken: plan?.dryRunToken, expectedCount: plan?.count } : undefined),
     })).data,
     onSuccess: () => {
-      // config, documents, indices and the audit log may all have changed (not this dry run: it is done)
-      qc.invalidateQueries({ predicate: (q) => q.queryKey[0] !== "rollback-dry" });
-      toast(target.kind === "index" ? `Recreated ${target.index} (empty)` : "Rolled back. The rollback is in the audit log and can be undone too.");
+      toast(target.kind === "index" ? `Recreated ${target.index} (empty)` : target.kind === "create" ? `Deleted the empty index ${target.index}. Recreate brings it back.`
+        : "Rolled back. The rollback is in the audit log and can be undone too.");
+      // leave the page first (onDone may navigate away from an index that no longer exists),
+      // then refresh: config, documents, indices and the audit log may all have changed
       onDone?.();
       onClose();
+      setTimeout(() => qc.invalidateQueries({ predicate: (q) => q.queryKey[0] !== "rollback-dry" }), 0);
     },
   });
 
@@ -128,8 +138,8 @@ export function RollbackDialog({ target, onClose, onDone }: { target: RollbackTa
       footer={<>
         <button type="button" className="btn" onClick={onClose} disabled={run.isPending}>Cancel</button>
         {plan && !nothing && (
-          <button type="button" className="btn btn-primary" disabled={!ready || run.isPending} onClick={() => run.mutate()}>
-            <Icon name="undo" /> {run.isPending ? "Working…" : target.kind === "index" ? "Recreate empty index" : "Roll back"}
+          <button type="button" className="btn btn-primary" disabled={!ready || run.isPending || run.error instanceof PendingApproval} onClick={() => run.mutate()}>
+            <Icon name="undo" /> {run.isPending ? "Working…" : applyLabel(needsApproval, target.kind === "index" ? "Recreate empty index" : "Roll back")}
           </button>
         )}
       </>}>
@@ -144,6 +154,11 @@ export function RollbackDialog({ target, onClose, onDone }: { target: RollbackTa
             </Callout>
           )}
           {target.kind === "index" && <RecreateView r={plan} />}
+          {target.kind === "create" && (
+            <Callout tone="warn" icon="undo" title={<>The empty index <span className="mono">{target.index}</span> will be deleted</>}>
+              It has no documents. Its settings and mappings are kept under Indices → Deleted through the API, so it can be recreated.
+            </Callout>
+          )}
           {nothing ? (
             <Callout icon="info" title="Nothing to roll back">It is already in the state from before that change.</Callout>
           ) : (

@@ -82,7 +82,7 @@ ui/
 │   │   ├── Shell.tsx       sidebar, cluster switcher, top bar, page frame
 │   │   ├── ChangeFlow.tsx  edit → dry run → apply; rollback + snapshot dialogs; status badges
 │   │   ├── DiffTable.tsx   added / changed / removed table
-│   │   ├── JsonEditor.tsx  CodeMirror JSON editor with linting, themed by CSS variables
+│   │   ├── JsonEditor.tsx  CodeMirror JSON editor with linting and optional autocomplete, themed by CSS variables
 │   │   ├── ui.tsx          Callout, Badge, Dialog (focus trap), toasts, ErrorCallout, helpers
 │   │   └── icons.tsx       stroke icon set
 │   └── pages/
@@ -92,6 +92,9 @@ ui/
 │       ├── Data.tsx             data browser: query, filters, time range, columns, sort, document view, export
 │       ├── DataEdit.tsx         document edit / create / delete / history + bulk update / delete dialogs
 │       ├── NamedResources.tsx   index/component templates, ILM policies, ingest pipelines
+│       ├── Requests.tsx         approval requests: list, one request, approve / reject, ChangePreview
+│       ├── ShellPage.tsx        the Shell: request line with suggestions, body with autocomplete, response, history
+│       ├── CreateIndex.tsx, Rollback.tsx   create-index dialog; roll back any change
 │       └── admin/Clusters.tsx, admin/Users.tsx, admin/Allowlist.tsx, admin/Audit.tsx
 ```
 
@@ -107,6 +110,8 @@ ui/
 | `/c/:cluster/indices/:index/settings` · `/mapping` | Index detail | view+ |
 | `/c/:cluster/data?index=&q=&f=&tf=&tg=&tl=&sort=&from=&size=&cols=` | Data browser (all search state in the URL, so a search can be bookmarked or shared); edits need edit on the document's index | view+ |
 | `/c/:cluster/{index-templates,component-templates,ilm-policies,ingest-pipelines}[/:name]` (`?new=1`) | Named resources | view+ |
+| `/c/:cluster/shell` | Shell (Dev Tools-style requests; writes go through the change flows) | view+ |
+| `/requests` (`?tab=pending\|all`, `status`, `clusterId`, `requestedBy`) · `/requests/:id` | Approval requests: your own, or (admins) the queue and every request | signed in |
 | `/account/password` | Change password | signed in |
 | `/admin/clusters` · `/admin/users` · `/admin/allowlist` · `/admin/audit` | Administration | admin |
 
@@ -178,6 +183,28 @@ Every config screen reuses one component:
 Props of note: `permanent` (mappings: adds the "I understand" tick), `sampleDocs` (pipelines),
 `toConfig` (reshape before sending), `absent` (the word shown for a missing value: "default"
 for settings, "—" for resources).
+
+### Approvals
+
+A non-admin's real write answers `202 {"pendingApproval": true, "approval": …}`. `request()` in
+`api.ts` turns that into a thrown `PendingApproval` (a subclass of `ApiError`), so no dialog
+runs its "applied" path, and calls the handler `Shell.tsx` registers: a toast and a refresh of
+the `["approvals"]` queries (the sidebar count polls `/approvals/_count` every minute).
+`ErrorCallout` shows a `PendingApproval` as a blue "Sent to the admins for approval" notice
+with a link to the request, and the dialogs disable their button after it. `useNeedsApproval()`
+(from `/me`'s `approvalsRequired`) and `applyLabel()` turn **Apply** into **Request approval**.
+`pages/Requests.tsx` holds the list, the request page and `ChangePreview` (the stored dry run
+shown per kind of change), which the Shell reuses.
+
+### Shell (`pages/ShellPage.tsx`)
+
+Method + path (`PathInput`: suggestions for the segment being typed from the index list and
+known endpoints; a pasted `GET my-index/_search` line is split), a CodeMirror JSON body with an
+`autocompletion` source of the target's fields (`…/data/<target>/_fields`) and DSL words, and a
+read-only response editor. Non-GET requests are sent with `dryRun: true` first; a `kind:
+"write"` answer shows `ChangePreview` and asks for the reason / typed confirmation / count
+before the real call. History comes from `…/shell/history`; **Copy as curl** builds the API
+call.
 
 ### Errors
 

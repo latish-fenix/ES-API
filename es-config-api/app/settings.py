@@ -25,6 +25,8 @@ class Settings:
     secrets_prefix: str = "es-config-api/"
     secrets_kms_key_id: str | None = None     # optional customer-managed KMS key for new secrets
     secrets_endpoint_url: str | None = None   # e.g. a VPC endpoint URL; normally unset
+    secrets_region: str | None = None         # default AWS_REGION
+    secrets_legacy_region: str | None = None  # old region: read from, moved out of on update
     local_secrets_dir: str = "./.local-secrets"
 
     # Clusters
@@ -43,6 +45,13 @@ class Settings:
     cookie_secure: bool = False               # set true once the API is served over HTTPS
     lockout_attempts: int = 5
     lockout_minutes: int = 15
+
+    # Approvals and email (AWS SES). No MAIL_FROM = approvals work, but no email is sent.
+    approvals_required: bool = True           # non-admin changes wait for an admin
+    mail_from: str = ""
+    ses_region: str | None = None             # default AWS_REGION
+    public_url: str = ""                      # console address used in email links, e.g. http://172.0.58.49
+    approval_expiry_days: int = 7
 
     # Behaviour
     lock_ttl_seconds: int = 600
@@ -64,6 +73,13 @@ class Settings:
             secrets_prefix=sprefix,
             secrets_kms_key_id=env("SECRETS_KMS_KEY_ID") or None,
             secrets_endpoint_url=env("SECRETS_ENDPOINT_URL") or None,
+            secrets_region=env("SECRETS_REGION") or None,
+            secrets_legacy_region=env("SECRETS_LEGACY_REGION") or None,
+            approvals_required=env("APPROVALS_REQUIRED", "true").lower() in ("1", "true", "yes"),
+            mail_from=env("MAIL_FROM", ""),
+            ses_region=env("SES_REGION") or None,
+            public_url=env("PUBLIC_URL", "").rstrip("/"),
+            approval_expiry_days=int(env("APPROVAL_EXPIRY_DAYS", "7")),
             local_secrets_dir=env("LOCAL_SECRETS_DIR", "./.local-secrets"),
             s3_bucket=env("S3_BUCKET", ""),
             s3_prefix=prefix,

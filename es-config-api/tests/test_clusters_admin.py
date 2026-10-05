@@ -51,7 +51,8 @@ def test_add_use_update_remove(mapp, es, prefix):
     assert API_PASSWORD not in mapp["path"].read_text() and saved["createdBy"] == "root"
     assert _secret(mapp, "clusters/added") == {"password": API_PASSWORD}
     assert body["cluster"]["credentials"] == {"store": "secrets-manager", "present": True,
-                                              "secretName": "es-config-api/clusters/added"}
+                                              "secretName": "es-config-api/clusters/added",
+                                              "region": "us-east-1"}
     # nothing about clusters (let alone the password) went to S3
     keys = [o["Key"] for o in mapp["s3"].list_objects_v2(Bucket=BUCKET).get("Contents", [])]
     assert not any("cluster" in k and "state/" in k for k in keys)

@@ -14,6 +14,8 @@ import { Indices } from "./pages/Indices";
 import { Login } from "./pages/Login";
 import { NamedResources } from "./pages/NamedResources";
 import { Overview } from "./pages/Overview";
+import { RequestDetail, Requests } from "./pages/Requests";
+import { ShellPage } from "./pages/ShellPage";
 import { lastCluster, RequireAdmin, RequireAuth, useClusters, useMe } from "./session";
 
 function Home() {
@@ -55,6 +57,7 @@ export function App() {
         <Route path="c/:clusterId/cluster-settings" element={<RequireAdmin><ClusterSettings /></RequireAdmin>} />
         <Route path="c/:clusterId/indices" element={<Indices />} />
         <Route path="c/:clusterId/data" element={<Data />} />
+        <Route path="c/:clusterId/shell" element={<ShellPage />} />
         <Route path="c/:clusterId/indices/:index" element={<IndexDetail />} />
         <Route path="c/:clusterId/indices/:index/:part" element={<IndexDetail />} />
         {NAMED_TYPES.map((t) => (
@@ -64,6 +67,8 @@ export function App() {
           <Route key={`${t}-name`} path={`c/:clusterId/${t}/:name`} element={<NamedResources key={t} type={t} />} />
         ))}
         <Route path="account/password" element={<ChangePassword />} />
+        <Route path="requests" element={<Requests />} />
+        <Route path="requests/:requestId" element={<RequestDetail />} />
         <Route path="admin/clusters" element={<RequireAdmin><Clusters /></RequireAdmin>} />
         <Route path="admin/users" element={<RequireAdmin><Users /></RequireAdmin>} />
         <Route path="admin/allowlist" element={<RequireAdmin><Allowlist /></RequireAdmin>} />

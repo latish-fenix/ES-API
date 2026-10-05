@@ -87,7 +87,7 @@ def prefix(es):
 
 
 @pytest.fixture()
-def env(tmp_path, monkeypatch):
+def env(tmp_path, monkeypatch, request):
     monkeypatch.setenv("TEST_ES_PASSWORD", API_PASSWORD)
     clusters_file = tmp_path / "clusters.yaml"
     clusters_file.write_text(f"""
@@ -109,7 +109,7 @@ clusters:
         s3.create_bucket(Bucket=BUCKET)
         settings = Settings(storage_backend="s3", s3_bucket=BUCKET, s3_prefix="t/", auth_mode="header",
                             clusters_file=str(clusters_file), bootstrap_admins=["root"],
-                            lock_ttl_seconds=60)
+                            lock_ttl_seconds=60, approvals_required=request.param if hasattr(request, "param") else False)
         store = S3Store(BUCKET, "t/", client=s3)
         app = create_app(settings, store=store,
                          registry=ClusterRegistry(load_clusters(str(clusters_file))))

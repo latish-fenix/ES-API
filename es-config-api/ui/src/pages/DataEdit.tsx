@@ -3,11 +3,12 @@
 // previous state in S3 so it can be undone.
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
-import { ApiError, enc, get, request, type BulkChange, type BulkPreview, type DataHit, type DataSearchBody, type Diff, type DocVersion } from "../api";
+import { ApiError, PendingApproval, enc, get, request, type BulkChange, type BulkPreview, type DataHit, type DataSearchBody, type Diff, type DocVersion } from "../api";
 import { DiffTable } from "../components/DiffTable";
 import { Icon } from "../components/icons";
 import { JsonEditor, parseJson } from "../components/JsonEditor";
-import { Badge, Callout, Dialog, Empty, ErrorCallout, Loading, ReasonField, Spinner, useToast } from "../components/ui";
+import { applyLabel, Badge, Callout, Dialog, Empty, ErrorCallout, Loading, ReasonField, Spinner, useToast } from "../components/ui";
+import { useNeedsApproval } from "../session";
 import { num, when } from "../format";
 
 const pretty = (v: unknown) => JSON.stringify(v, null, 2);
@@ -28,6 +29,7 @@ function useInvalidateData(clusterId: string) {
 // ------------------------------------------------------------------ edit one document
 
 export function EditDoc({ clusterId, hit, onDone, onCancel }: { clusterId: string; hit: DataHit; onDone: () => void; onCancel: () => void }) {
+  const needsApproval = useNeedsApproval();
   const toast = useToast();
   const invalidate = useInvalidateData(clusterId);
   const [text, setText] = useState(pretty(hit._source));
@@ -63,7 +65,7 @@ export function EditDoc({ clusterId, hit, onDone, onCancel }: { clusterId: strin
         {!preview || emptyDiff(preview) ? (
           <button type="button" className="btn btn-primary" disabled={!isObj || dry.isPending} onClick={() => dry.mutate()}>{dry.isPending ? <Spinner label="Checking" /> : <Icon name="eye" />} Preview changes</button>
         ) : (
-          <button type="button" className="btn btn-primary" disabled={!reason.trim() || save.isPending} onClick={() => save.mutate()}>{save.isPending ? "Saving…" : "Save document"}</button>
+          <button type="button" className="btn btn-primary" disabled={!reason.trim() || save.isPending || save.error instanceof PendingApproval} onClick={() => save.mutate()}>{save.isPending ? "Saving…" : applyLabel(needsApproval, "Save document")}</button>
         )}
       </div>
     </div>
@@ -71,6 +73,7 @@ export function EditDoc({ clusterId, hit, onDone, onCancel }: { clusterId: strin
 }
 
 export function DeleteDoc({ clusterId, hit, onDone, onCancel }: { clusterId: string; hit: DataHit; onDone: () => void; onCancel: () => void }) {
+  const needsApproval = useNeedsApproval();
   const toast = useToast();
   const invalidate = useInvalidateData(clusterId);
   const [confirm, setConfirm] = useState("");
@@ -92,13 +95,14 @@ export function DeleteDoc({ clusterId, hit, onDone, onCancel }: { clusterId: str
       {del.error && <ErrorCallout error={del.error} />}
       <div className="row" style={{ gap: 8, justifyContent: "flex-end" }}>
         <button type="button" className="btn" onClick={onCancel} disabled={del.isPending}>Keep</button>
-        <button type="button" className="btn btn-danger" disabled={confirm !== hit._id || !reason.trim() || del.isPending} onClick={() => del.mutate()}>{del.isPending ? "Deleting…" : "Delete document"}</button>
+        <button type="button" className="btn btn-danger" disabled={confirm !== hit._id || !reason.trim() || del.isPending || del.error instanceof PendingApproval} onClick={() => del.mutate()}>{del.isPending ? "Deleting…" : applyLabel(needsApproval, "Delete document")}</button>
       </div>
     </div>
   );
 }
 
 export function DocHistory({ clusterId, hit, canEdit, onRestored }: { clusterId: string; hit: DataHit; canEdit: boolean; onRestored: () => void }) {
+  const needsApproval = useNeedsApproval();
   const toast = useToast();
   const invalidate = useInvalidateData(clusterId);
   const base = `/clusters/${enc(clusterId)}/data/${enc(hit._index)}/_doc/${enc(hit._id)}`;
@@ -148,7 +152,7 @@ export function DocHistory({ clusterId, hit, canEdit, onRestored }: { clusterId:
               {run.error && <ErrorCallout error={run.error} />}
               <div className="row" style={{ gap: 8, justifyContent: "flex-end" }}>
                 <button type="button" className="btn" onClick={() => { setPick(null); setPlan(null); }}>Cancel</button>
-                {plan.plan !== "nothing" && <button type="button" className="btn btn-primary" disabled={!reason.trim() || run.isPending} onClick={() => run.mutate()}>{run.isPending ? "Restoring…" : "Restore"}</button>}
+                {plan.plan !== "nothing" && <button type="button" className="btn btn-primary" disabled={!reason.trim() || run.isPending || run.error instanceof PendingApproval} onClick={() => run.mutate()}>{run.isPending ? "Restoring…" : applyLabel(needsApproval, "Restore")}</button>}
               </div>
             </>
           )}
@@ -163,6 +167,7 @@ export function DocHistory({ clusterId, hit, canEdit, onRestored }: { clusterId:
 export function NewDocDialog({ clusterId, indices, initialIndex, sample, onClose }: {
   clusterId: string; indices: string[]; initialIndex: string; sample?: Record<string, unknown>; onClose: () => void;
 }) {
+  const needsApproval = useNeedsApproval();
   const toast = useToast();
   const invalidate = useInvalidateData(clusterId);
   const [index, setIndex] = useState(indices.includes(initialIndex) ? initialIndex : indices[0] ?? "");
@@ -180,7 +185,7 @@ export function NewDocDialog({ clusterId, indices, initialIndex, sample, onClose
     <Dialog wide title="New document" subtitle="Saved with a reason in the audit log; it can be undone from its history." onClose={onClose} busy={create.isPending}
       footer={<>
         <button type="button" className="btn" onClick={onClose} disabled={create.isPending}>Cancel</button>
-        <button type="button" className="btn btn-primary" disabled={!index || !isObj || !reason.trim() || create.isPending} onClick={() => create.mutate()}>{create.isPending ? "Creating…" : "Create document"}</button>
+        <button type="button" className="btn btn-primary" disabled={!index || !isObj || !reason.trim() || create.isPending || create.error instanceof PendingApproval} onClick={() => create.mutate()}>{create.isPending ? "Creating…" : applyLabel(needsApproval, "Create document")}</button>
       </>}>
       <div className="grid-2" style={{ gap: 14 }}>
         <div className="field">
@@ -225,6 +230,7 @@ function parseValue(v: string): unknown {
 export function BulkDialog({ op, clusterId, index, search, describe, onClose }: {
   op: "update" | "delete"; clusterId: string; index: string; search: DataSearchBody; describe: string; onClose: () => void;
 }) {
+  const needsApproval = useNeedsApproval();
   const toast = useToast();
   const invalidate = useInvalidateData(clusterId);
   const [rows, setRows] = useState<SetRow[]>([{ field: "", value: "" }]);
@@ -275,8 +281,8 @@ export function BulkDialog({ op, clusterId, index, search, describe, onClose }: 
         {!preview ? (
           <button type="button" className="btn btn-primary" disabled={!hasSpec || dry.isPending} onClick={() => dry.mutate()}>{dry.isPending ? <Spinner label="Counting" /> : <Icon name="eye" />} Dry run</button>
         ) : n > 0 ? (
-          <button type="button" className={`btn ${op === "delete" ? "btn-danger" : "btn-primary"}`} disabled={typed !== String(n) || !reason.trim() || run.isPending}
-            onClick={() => run.mutate()}>{run.isPending ? "Working…" : `${op === "update" ? "Update" : "Delete"} ${num(n)} document${n === 1 ? "" : "s"}`}</button>
+          <button type="button" className={`btn ${op === "delete" ? "btn-danger" : "btn-primary"}`} disabled={typed !== String(n) || !reason.trim() || run.isPending || run.error instanceof PendingApproval}
+            onClick={() => run.mutate()}>{run.isPending ? "Working…" : applyLabel(needsApproval, `${op === "update" ? "Update" : "Delete"} ${num(n)} document${n === 1 ? "" : "s"}`)}</button>
         ) : null}
       </>}>
       <div className="callout" style={{ flexDirection: "column", gap: 4 }}>
@@ -345,6 +351,7 @@ export function BulkDialog({ op, clusterId, index, search, describe, onClose }: 
 }
 
 export function ChangesDialog({ clusterId, onClose }: { clusterId: string; onClose: () => void }) {
+  const needsApproval = useNeedsApproval();
   const toast = useToast();
   const invalidate = useInvalidateData(clusterId);
   const q = useQuery({ queryKey: ["bulk-changes", clusterId], queryFn: () => get<{ items: BulkChange[] }>(`/clusters/${enc(clusterId)}/data/_changes`).then((r) => r.items) });
@@ -400,7 +407,7 @@ export function ChangesDialog({ clusterId, onClose }: { clusterId: string; onClo
               {run.error && <ErrorCallout error={run.error} />}
               <div className="row" style={{ gap: 8, justifyContent: "flex-end" }}>
                 <button type="button" className="btn" onClick={() => { setPick(null); setPlan(null); }}>Cancel</button>
-                <button type="button" className="btn btn-primary" disabled={typed !== String(plan.count) || !reason.trim() || run.isPending} onClick={() => run.mutate()}>{run.isPending ? "Restoring…" : "Restore"}</button>
+                <button type="button" className="btn btn-primary" disabled={typed !== String(plan.count) || !reason.trim() || run.isPending || run.error instanceof PendingApproval} onClick={() => run.mutate()}>{run.isPending ? "Restoring…" : applyLabel(needsApproval, "Restore")}</button>
               </div>
             </>
           )}

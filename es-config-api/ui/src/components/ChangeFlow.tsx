@@ -1,11 +1,12 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { useEffect, useState, type ReactNode } from "react";
-import { ApiError, get, request, type ChangeResult, type Snapshot } from "../api";
+import { ApiError, PendingApproval, get, request, type ChangeResult, type Snapshot } from "../api";
 import { pretty, when } from "../format";
 import { DiffTable, diffCount } from "./DiffTable";
 import { Icon } from "./icons";
 import { JsonEditor, parseJson } from "./JsonEditor";
-import { Badge, Callout, Dialog, ErrorCallout, Loading, ReasonField, useToast } from "./ui";
+import { applyLabel, Badge, Callout, Dialog, ErrorCallout, Loading, ReasonField, useToast } from "./ui";
+import { useNeedsApproval } from "../session";
 
 type Stage = "edit" | "checked" | "applied";
 
@@ -112,6 +113,7 @@ export interface ChangeFlowProps {
 }
 
 export function ChangeFlow(p: ChangeFlowProps) {
+  const needsApproval = useNeedsApproval();
   const toast = useToast();
   const [stage, setStage] = useState<Stage>("edit");
   const [result, setResult] = useState<ChangeResult | null>(null);
@@ -190,7 +192,7 @@ export function ChangeFlow(p: ChangeFlowProps) {
   const err = dryRun.error instanceof ApiError ? dryRun.error : apply.error;
   const needsForce = err instanceof ApiError && err.code === "CLUSTER_UNHEALTHY";
   const canApply = stage === "checked" && !!result && !result.noChange && result.valid !== false
-    && reason.trim().length > 0 && (!p.permanent || ack) && !apply.isPending;
+    && reason.trim().length > 0 && (!p.permanent || ack) && !apply.isPending && !(apply.error instanceof PendingApproval);
 
   return (
     <section className="card" aria-label={p.title ?? "Change"}>
@@ -224,6 +226,7 @@ export function ChangeFlow(p: ChangeFlowProps) {
             {!result.noChange && result.valid !== false && (
               <>
                 <ReasonField value={reason} onChange={setReason} />
+                {needsApproval && <span className="hint">This goes to the admins for approval: it is applied when one of them approves it, and you get an email.</span>}
                 {p.permanent && (
                   <label className="check"><input type="checkbox" checked={ack} onChange={(e) => setAck(e.target.checked)} /> I understand this can't be removed or rolled back later</label>
                 )}
@@ -244,7 +247,7 @@ export function ChangeFlow(p: ChangeFlowProps) {
           <>
             <button type="button" className="btn" onClick={() => { setStage("edit"); setResult(null); }}>Back to edit</button>
             <button type="button" className="btn btn-primary" disabled={!canApply} onClick={() => apply.mutate()}>
-              {apply.isPending ? "Applying…" : p.applyLabel ?? "Apply change"}
+              {apply.isPending ? (needsApproval ? "Sending…" : "Applying…") : applyLabel(needsApproval, p.applyLabel ?? "Apply change")}
             </button>
           </>
         ) : (
@@ -269,6 +272,7 @@ export function RollbackDialog({ path, label, absent, clusterId, admin, onClose,
   onClose: () => void;
   onDone: () => void;
 }) {
+  const needsApproval = useNeedsApproval();
   const toast = useToast();
   const [reason, setReason] = useState("");
   const [force, setForce] = useState(false);
@@ -301,9 +305,9 @@ export function RollbackDialog({ path, label, absent, clusterId, admin, onClose,
       footer={
         <>
           <button type="button" className="btn" onClick={onClose} disabled={run.isPending}>Cancel</button>
-          <button type="button" className="btn btn-primary" disabled={!r || r.noChange || !reason.trim() || run.isPending} onClick={() => run.mutate()}>
+          <button type="button" className="btn btn-primary" disabled={!r || r.noChange || !reason.trim() || run.isPending || run.error instanceof PendingApproval} onClick={() => run.mutate()}>
             <Icon name="undo" />
-            {run.isPending ? "Rolling back…" : "Roll back"}
+            {run.isPending ? "Working…" : applyLabel(needsApproval, "Roll back")}
           </button>
         </>
       }

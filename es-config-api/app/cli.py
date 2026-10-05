@@ -10,7 +10,12 @@
         clusters.yaml and its variable from .env.
 
     docker compose exec es-config-api python -m app.cli secrets-status
-        Lists which secrets exist (names only, never values).
+        Lists which secrets exist and the region each is read from (names only, never values).
+
+    docker compose exec es-config-api python -m app.cli migrate-secrets --dry-run
+        With SECRETS_LEGACY_REGION set: lists the secrets still in the legacy region. Without
+        --dry-run it copies each one (value unchanged) to the main region and schedules the
+        legacy copy for deletion (recoverable for 7 days). Safe to run again.
 """
 from __future__ import annotations
 
@@ -61,16 +66,46 @@ def main(argv: list[str]) -> int:
         return 0
 
     if cmd == "secrets-status":
-        # clusters without authentication (auth type none) have no secret
-        names = ["app"] + [c.secret for c in load_clusters(settings.clusters_file).values() if c.secret]
-        store = build_store(settings)
-        names += [f"users/{u['username']}" for u in UsersRepo(store, settings.bootstrap_admins).list()]
-        for n in names:
-            print(f"{'present' if secrets.get(n) else 'MISSING':8}  {secrets.full_name(n)}")
+        for n in _secret_names(settings):
+            where = secrets.where(n)
+            print(f"{'present' if where else 'MISSING':8}  {where or '-':10}  {secrets.full_name(n)}")
+        return 0
+
+    if cmd == "migrate-secrets":
+        dry = "--dry-run" in args
+        legacy = getattr(secrets, "legacy_region", None)
+        if not legacy:
+            print("SECRETS_LEGACY_REGION is not set (or equals the main region): nothing to move")
+            return 0
+        print(f"{'Would move' if dry else 'Moving'} secrets from {legacy} to {secrets.region}"
+              f"{' (dry run, nothing changed)' if dry else ''}")
+        counts: dict[str, int] = {}
+        for n in _secret_names(settings):
+            what = secrets.migrate(n, dry_run=dry)
+            counts[what] = counts.get(what, 0) + 1
+            label = {"moved": "would move" if dry else "moved",
+                     "retired": "old copy would be retired" if dry else "old copy retired",
+                     "in-main": "already moved", "missing": "MISSING"}[what]
+            print(f"{label:26}  {secrets.full_name(n)}")
+        print(", ".join(f"{k}: {v}" for k, v in sorted(counts.items())))
+        if not dry and (counts.get("moved") or counts.get("retired")):
+            print(f"The {legacy} copies are scheduled for deletion in 7 days (restore them in the "
+                  "AWS console if needed). Restart is not needed.")
         return 0
 
     print(__doc__)
     return 2
+
+
+def _secret_names(settings: Settings) -> list[str]:
+    """Every secret the API uses: app, each cluster that has credentials, each user."""
+    from .clusters import ClusterRegistry
+    reg = ClusterRegistry(load_clusters(settings.clusters_file), settings.managed_clusters_file or None)
+    # clusters without authentication (auth type none) have no secret
+    names = ["app"] + sorted({c.secret for c in reg.all() if c.secret})
+    store = build_store(settings)
+    names += [f"users/{u['username']}" for u in UsersRepo(store, settings.bootstrap_admins).list()]
+    return names
 
 
 if __name__ == "__main__":

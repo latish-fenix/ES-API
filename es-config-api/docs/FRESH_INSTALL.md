@@ -23,7 +23,7 @@ git commit -m "Secrets Manager, index access, document edits, optional cluster p
 git push
 ```
 
-In the steps below, replace the values in `< >`. The examples use the bucket `fenix-es-config-api`, the prefix `es-config-api/`, the region `us-east-1` and the new Elasticsearch account `es_console_api`.
+In the steps below, replace the values in `< >`. The examples use the bucket `fenix-es-config-api`, the prefix `es-config-api/`, the region `us-west-2` (bucket, secrets and SES) and the new Elasticsearch account `es_console_api`.
 
 ## Step 1: Stop the old installation and delete its data
 
@@ -51,11 +51,12 @@ This removes the old users (including the demo ones), snapshots, audit log, allo
 3. Delete any old secrets under the prefix (also in CloudShell). The old server kept its secrets in `.env`, so this usually finds nothing:
 
    ```bash
-   REGION=us-east-1
+   for REGION in us-west-2 us-east-1; do        # older installs kept secrets in us-east-1
    for s in $(aws secretsmanager list-secrets --region $REGION \
        --filters Key=name,Values=es-config-api/ --query 'SecretList[].Name' --output text); do
      echo "deleting $s"
      aws secretsmanager delete-secret --region $REGION --secret-id "$s" --force-delete-without-recovery
+   done
    done
    ```
 
@@ -83,9 +84,9 @@ ls app/secret_store.py docs/FRESH_INSTALL.md   # both must exist, or the pull di
 
 No clone yet on this server? `cd ~ && git clone https://github.com/latish-fenix/ES-API.git`, then continue in `~/ES-API/es-config-api`.
 
-## Step 3: Give the EC2 role access to S3 and Secrets Manager
+## Step 3: Give the EC2 role access to S3, Secrets Manager and SES
 
-The API stores its data in S3 and every password, key and hash in AWS Secrets Manager, using the EC2 instance's IAM role (no AWS keys on the server).
+The API stores its data in S3, every password, key and hash in AWS Secrets Manager, and sends the approval emails with Amazon SES, all through the EC2 instance's IAM role (no AWS keys on the server).
 
 1. **S3 bucket** (keep the existing one, or create `fenix-es-config-api`): Block Public Access on, versioning on, default encryption on.
 2. **Policy**: on EC2, fill in the account id and print the policy:
@@ -97,11 +98,21 @@ The API stores its data in S3 and every password, key and hash in AWS Secrets Ma
    sed "s/ACCOUNT_ID/$ACCOUNT_ID/g" docs/iam-policy.json
    ```
 
-   If your bucket, prefix or region differ from `fenix-es-config-api`, `es-config-api/` and `us-east-1`, change them in the output too. Delete the last statement (`KmsIfBucketOrSecretsUseACustomerManagedKey`) unless the bucket or secrets use your own KMS key.
+   If your bucket, prefix or region differ from `fenix-es-config-api`, `es-config-api/` and `us-west-2`, change them in the output too. On a fresh install with nothing left in us-east-1 you can drop the us-east-1 line of the Secrets Manager statement. Delete the last statement (`KmsIfBucketOrSecretsUseACustomerManagedKey`) unless the bucket or secrets use your own KMS key.
 3. **Attach it**: AWS console → IAM → Roles → the role from above → **Add permissions → Create inline policy → JSON**, paste, name it `es-config-api`, save. Replace any older `es-config-api` policy on that role.
 4. **No internet on the instance?** Add a VPC interface endpoint for `secretsmanager` and a gateway endpoint for `s3` in its VPC.
 
-The policy allows only the bucket prefix and secrets named `es-config-api/*`, and allows S3 deletes only for locks and allowlist overrides.
+The policy allows only the bucket prefix and secrets named `es-config-api/*`, allows S3 deletes only for locks and allowlist overrides, and allows sending email only from the approval sender.
+
+### Step 3b: Set up the approval emails (SES)
+
+Changes made by non-admins wait for an admin, and the admins are emailed. To send those emails:
+
+1. AWS console → **Amazon SES** (region **us-west-2**) → **Identities** → check that `fenix_int_product_alerts@fenixcommerce.com` (or the whole domain `fenixcommerce.com`) is **Verified**. If not: **Create identity**, then open the link AWS emails to that address.
+2. The policy's `SendApprovalEmails` statement must name that identity: `arn:aws:ses:us-west-2:<ACCOUNT_ID>:identity/fenix_int_product_alerts@fenixcommerce.com`, or `…:identity/fenixcommerce.com` if the domain is what is verified.
+3. Is the account still in the **SES sandbox**? `aws sesv2 get-account --region us-west-2 --query ProductionAccessEnabled` prints `false` if so. In the sandbox SES only delivers to verified addresses, and checks the policy for each recipient too. Either verify each admin's address and change the statement's resource to `arn:aws:ses:us-west-2:<ACCOUNT_ID>:identity/*`, or ask AWS for production access (**SES → Account dashboard → Request production access**).
+
+Without SES the console still works: requests wait on the **Requests** page, only the emails are missing (each request shows whether its emails went out).
 
 ## Step 4: Create a new Elasticsearch account and remove the old ones
 
@@ -162,7 +173,10 @@ In `.env`, set these lines and leave the rest as they are:
 | `API_PORT` | `80` | The console is at `http://172.0.58.49/ui/` |
 | `S3_BUCKET` | `fenix-es-config-api` (your bucket) | Where the API keeps its data |
 | `S3_PREFIX` | `es-config-api/` | Folder in the bucket (the one emptied in Step 1) |
-| `AWS_REGION` | `us-east-1` | Region of the bucket and the secrets |
+| `AWS_REGION` | `us-west-2` | Region of the bucket, the secrets and SES |
+| `SECRETS_LEGACY_REGION` | empty on a fresh install | Only when secrets from an older install are still in `us-east-1`: set `us-east-1` and they move over (see the README) |
+| `MAIL_FROM` | `fenix_int_product_alerts@fenixcommerce.com` | Sender of the approval emails (verified in Step 3b) |
+| `PUBLIC_URL` | `http://172.0.58.49` | The console's address, used for links in the emails |
 | `SECRETS_BACKEND` | `aws` | Every secret in AWS Secrets Manager |
 | `SECRETS_PREFIX` | `es-config-api/` | Secret names start with this |
 | `BOOTSTRAP_ADMINS` | `latish.madapada@fenixcommerce.com` | The first admin (comma-separate several) |
@@ -190,7 +204,7 @@ On this first start the API creates the secret `es-config-api/app` with a random
 Read the password (on EC2; the role is allowed to read its own secrets):
 
 ```bash
-aws secretsmanager get-secret-value --region us-east-1 --secret-id es-config-api/app \
+aws secretsmanager get-secret-value --region us-west-2 --secret-id es-config-api/app \
   --query SecretString --output text \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["bootstrapAdminPassword"])'
 ```
@@ -201,8 +215,8 @@ Check that the secrets exist:
 
 ```bash
 docker compose exec es-config-api python -m app.cli secrets-status
-# present   es-config-api/app
-# present   es-config-api/users/latish.madapada@fenixcommerce.com
+# present   us-west-2   es-config-api/app
+# present   us-west-2   es-config-api/users/latish.madapada@fenixcommerce.com
 ```
 
 ## Step 7: Sign in and set it up in the console
@@ -215,7 +229,7 @@ docker compose exec es-config-api python -m app.cli secrets-status
    - **Cluster without security**: leave the password empty (or pick **No password**). It is saved without authentication.
    - **Test connection** → green → **Add cluster**.
 4. **Open up what people may change**: **Administration → Allowlist**. Every config type starts locked; unlock the types and add the name patterns you want (see the User Guide).
-5. **Add people**: **Administration → Users → Add users**. Enter emails, pick each person's level per cluster (and index rules if needed), **Create**, then **Download CSV** and hand each person their password. Delete the CSV afterwards.
+5. **Add people**: **Administration → Users → Add users**. Enter emails, pick each person's level per cluster (and index rules if needed), **Create**, then **Download CSV** and hand each person their password. Delete the CSV afterwards. Their changes will wait for your approval on the **Requests** page; you get an email for each one.
 
 You now have one admin, your clusters and your people, and nothing from the old installation.
 
@@ -228,6 +242,7 @@ You now have one admin, your clusters and your people, and nothing from the old 
 | **Administration → Clusters → Details** | Credentials: "In AWS Secrets Manager · es-config-api/clusters/&lt;id&gt;" (or "Not needed" for a cluster without a password) |
 | `grep -i password .env config/clusters.yaml`, `sudo grep -i password data/clusters.managed.yaml` | Only comment lines from .env; nothing from the cluster files |
 | Overview | Nodes with CPU, RAM, heap and disk |
+| A test user changes a setting | It waits under **Requests**; the admins get an email (the request's History shows "Email to admins: 1 sent") |
 
 | Problem | Fix |
 | --- | --- |
@@ -238,6 +253,9 @@ You now have one admin, your clusters and your people, and nothing from the old 
 | Add cluster: "Can't connect", `ES_AUTH_FAILED` | Wrong username or password, or the cluster has security on and you left the password empty |
 | Add cluster: `CLUSTERS_FILE_NOT_WRITABLE` | `sudo chown 10001:10001 data && sudo chmod 700 data`, then `docker compose restart` |
 | Data page: `ES_READ_NOT_ALLOWED` / `ES_WRITE_NOT_ALLOWED` | The role in Step 4 misses `read` / `write` on indices |
+| Request shows "Email to admins: … failed (AccessDeniedException…)" | The `SendApprovalEmails` statement doesn't cover the sender, or (SES sandbox) the recipients: Step 3b |
+| Request shows "MessageRejected … not verified" | SES sandbox: verify each admin's address, or request production access (Step 3b) |
+| No email and "MAIL_FROM is not set" | Set `MAIL_FROM` in `.env`, `docker compose up -d` |
 | Port 80 already in use | Stop what uses it (`sudo ss -ltnp 'sport = :80'`) or set another `API_PORT` |
 
 ## Fresh start on your PC (local test)

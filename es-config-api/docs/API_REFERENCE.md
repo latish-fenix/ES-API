@@ -1,6 +1,6 @@
 # ES Config API — Endpoint Reference
 
-*Last updated 30 September 2026: roll back any change (config history, recreate deleted indices, recent document changes), index-level permissions, cluster settings for admins only, node stats, document edits and bulk changes with undo, every secret in AWS Secrets Manager. Kept in sync with the shared Claude Doc version of this reference. For the web console see [USER_GUIDE.md](USER_GUIDE.md).*
+*Last updated 5 October 2026: approvals (changes by non-admins wait for an admin, with email), the Shell (Dev Tools-style requests), secrets moving to us-west-2; create indices (with undo while empty); roll back any change (config history, recreate deleted indices, recent document changes), index-level permissions, cluster settings for admins only, node stats, document edits and bulk changes with undo, every secret in AWS Secrets Manager. Kept in sync with the shared Claude Doc version of this reference. For the web console see [USER_GUIDE.md](USER_GUIDE.md).*
 
 ## Basics
 
@@ -74,6 +74,18 @@ Each user has, per cluster, a **default level** and optional **index rules** (an
 ```
 
 A dry run also returns `simulation` (for index templates and ingest pipelines) and `valid`. A request that would change nothing returns `"noChange": true`.
+
+**Changes by non-admins wait for an admin.** When a user who is not an admin sends a real (non dry-run) change, nothing is applied: the API checks it with a dry run as that user, saves it as an approval request, emails the admins and answers **202**:
+
+```json
+{"applied": false, "dryRun": false, "pendingApproval": true,
+ "approval": {"id": "20261005T111735-066b02b6", "status": "PENDING", "label": "Change index settings",
+              "clusterId": "elkm2-prod", "resource": "shoppremiumoutlets.myshopify.com-shipment_summary-2024.09",
+              "summary": {"fields": ["index.refresh_interval"], "fieldCount": 1}, "expiresAt": "2026-10-12T11:17:35.000Z"},
+ "message": "Sent to the admins for approval. It is applied when an admin approves it."}
+```
+
+It runs when an admin approves it (see **Approvals**). Dry runs and reads are never held; admins' changes apply at once.
 
 ## Sign in
 
@@ -382,6 +394,39 @@ curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -X
 ```
 
 `POST …/mapping/rollback` always returns 422 `ROLLBACK_NOT_SUPPORTED`.
+
+### POST /api/v1/clusters/{clusterId}/indices/{index}
+
+Creates an index. Needs `edit` on the cluster (an index rule that lowers access for that name refuses it too); no allowlist. The body is `settings`, `mappings` and `aliases` (all optional); the matching index template adds its own, and yours win where they differ. `?dryRun=true` checks the combined result with Elasticsearch (`_index_template/_simulate`) and returns it, creating nothing; the real call also needs `reason`. Refused: a taken name (`INDEX_EXISTS`), a dot or invalid name (`INVALID_INDEX_NAME`), a name a data-stream template claims (`DATA_STREAM_TEMPLATE`), a body Elasticsearch would reject (`INVALID_INDEX_BODY`). Audited as `INDEX_CREATE` with the setting keys and field names, never values.
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -X POST "http://172.0.58.49/api/v1/clusters/elkm2-prod/indices/shoppremiumoutlets.myshopify.com-shipment_summary-2024.10?dryRun=true" -d '{
+  "settings": {"number_of_shards": 1, "number_of_replicas": 1},
+  "mappings": {"properties": {"order_id": {"type": "keyword"}, "created_date": {"type": "date"}}}
+}'
+```
+
+```json
+{"index": "shoppremiumoutlets.myshopify.com-shipment_summary-2024.10", "dryRun": true, "applied": false,
+ "template": {"name": "shipment-summary", "priority": 100, "indexPatterns": ["shoppremiumoutlets.myshopify.com-shipment_summary-*"], "composedOf": [], "dataStream": false},
+ "result": {"settings": {"index.number_of_shards": 1, "index.number_of_replicas": 1, "index.refresh_interval": "5s"},
+            "mappings": {"properties": {"vendor": {"type": "keyword"}, "status": {"type": "keyword"}, "order_id": {"type": "keyword"}, "created_date": {"type": "date"}}},
+            "aliases": {}},
+ "warnings": ["Template 'shipment-summary' (priority 100) also applies to this name: its settings and mappings are included below; yours win where they differ"],
+ "undo": "Roll back deletes it again, as long as it has no documents"}
+```
+
+Then the same call without `dryRun` and with `"reason": "October shipments"`; it returns `"applied": true` and the `changeId`.
+
+`GET …/indices/{index}/_create-preview` returns what the matching template would give the name (`exists`, `template`, `fromTemplates`), to pre-fill a form.
+
+### POST /api/v1/clusters/{clusterId}/indices/{index}/_undo-create
+
+Undoes a create made here: deletes the index **only while it has no documents** and is still the same index (`INDEX_NOT_EMPTY`, `INDEX_REPLACED` otherwise; then use `DELETE …` with its checks). Its definition is kept under `deleted-indices`, so it can be recreated. Body: `changeId` (optional, default the latest create) and `reason`; `?dryRun=true` first. Audited as `INDEX_DELETE` with `restoreOf` = the create. `GET …/indices/{index}/_created` says whether the index was created here and whether that can still be undone (`canUndo`, `docs`).
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -X POST http://172.0.58.49/api/v1/clusters/elkm2-prod/indices/shoppremiumoutlets.myshopify.com-shipment_summary-2024.10/_undo-create -d '{"reason": "Created too early"}'
+```
 
 ### DELETE /api/v1/clusters/{clusterId}/indices/{index}
 
@@ -908,6 +953,127 @@ curl -s -H "Authorization: Bearer $TOKEN" "http://172.0.58.49/api/v1/clusters/el
 
 A bulk change can now also be undone when it was itself a restore (`POST …/_changes/{changeId}/_restore` on the restore's `changeId`): documents it recreated are deleted again.
 
+## Approvals
+
+Every change by a non-admin (config updates, rollbacks and restores, index create / delete / recreate / undo, document create / edit / delete / restore, bulk changes, and the same writes typed in the Shell) becomes a request. The admins are emailed from `fenix_int_product_alerts@fenixcommerce.com` (AWS SES) with who, where, the reason and field names or counts (never values) and a link. On approve the dry run runs again as the requester; if it no longer gives the same result, nothing is applied and the request closes as `OUTDATED`. Otherwise the change runs as the requester and its audit entries carry `approvalId` and `approvedBy`. The requester is emailed the outcome. Pending requests expire after 7 days.
+
+| Status | Meaning |
+| --- | --- |
+| `PENDING` | waiting for an admin |
+| `APPLIED` | approved and applied (`result.changeId` is in the audit log, and can be rolled back) |
+| `REJECTED` | an admin said no (`comment` says why) |
+| `FAILED` | approved, but applying it failed (`error`) |
+| `OUTDATED` | it changed since the request; nothing applied |
+| `CANCELLED` / `EXPIRED` | withdrawn by the requester / nobody decided in time |
+
+### GET /api/v1/approvals
+
+`?scope=mine` (anyone: your own requests), `pending` or `all` (admins). Filters: `status`, `clusterId`, `requestedBy`, `limit` (≤ 500). Newest first; list items carry names and counts only.
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" "http://172.0.58.49/api/v1/approvals?scope=pending"
+```
+
+```json
+{"scope": "pending", "items": [{"id": "20261005T111735-066b02b6", "status": "PENDING", "op": "config.update",
+  "label": "Change index settings", "clusterId": "elkm2-prod",
+  "resource": "shoppremiumoutlets.myshopify.com-shipment_summary-2024.09", "reason": "Slower refresh during the October import",
+  "requestedBy": "idx.user@fenixcommerce.com", "requestedAt": "2026-10-05T11:17:35.120Z", "expiresAt": "2026-10-12T11:17:35.120Z",
+  "summary": {"fields": ["index.refresh_interval"], "fieldCount": 1}, "canApprove": true, "canCancel": false}]}
+```
+
+`GET /api/v1/approvals/_count` returns `{"pending": 3, "mine": 0}`: waiting for you (admins) and your own open requests.
+
+### GET /api/v1/approvals/{id}
+
+The full request: `params` and `body` (the change as sent), `preview` (its dry run when requested, with the diff), `events` (who did what, when), and for admins `mail` (which emails SES accepted). Only admins and the requester can read it.
+
+### POST /api/v1/approvals/{id}/_recheck
+
+Admins: runs the dry run again now, as the requester, and says whether it is still the same change (`upToDate`), with the current `preview`.
+
+### POST /api/v1/approvals/{id}/_approve
+
+Admins, not on their own request. Body `{"comment": "..."}` (optional). Returns the request with `status` and `applyResult` (what the change itself returned). `409 RESOURCE_CHANGED` when it changed since the request (the request is then `OUTDATED`); `409 REQUEST_CLOSED` when it is no longer pending; `409 REQUEST_BUSY` when another admin acted at the same moment.
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -X POST \
+  http://172.0.58.49/api/v1/approvals/20261005T111735-066b02b6/_approve -d '{"comment": "OK for the import window"}'
+```
+
+### POST /api/v1/approvals/{id}/_reject
+
+Admins. Body `{"comment": "why"}` (required, `COMMENT_REQUIRED` otherwise). Nothing is changed; the requester is emailed.
+
+### POST /api/v1/approvals/{id}/_cancel
+
+The requester withdraws a pending request.
+
+Audit actions: `APPROVAL_REQUESTED`, `APPROVAL_APPROVED`, `APPROVAL_REJECTED`, `APPROVAL_CANCELLED`, `APPROVAL_EXPIRED`, `APPROVAL_OUTDATED`, `APPROVAL_FAILED`.
+
+## Shell
+
+Dev Tools-style requests, inside the console's rules. The console's **Shell** page uses this endpoint.
+
+### POST /api/v1/clusters/{clusterId}/shell
+
+Body: `method` (`GET`, `POST`, `PUT`, `DELETE`), `path` (as in Kibana, query string allowed), `body` (JSON object, or NDJSON text for `_msearch`). For writes also `dryRun`, `reason`, `confirm` (deletes: the index name or document id), `dryRunToken` and `expectedCount` (bulk changes, from the dry run).
+
+**Reads** run at once and return Elasticsearch's answer unchanged (also its errors, with their status):
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -X POST \
+  http://172.0.58.49/api/v1/clusters/elkm2-prod/shell -d '{
+  "method": "POST", "path": "shoppremiumoutlets.myshopify.com-shipment_summary-*/_search",
+  "body": {"size": 0, "aggs": {"by_carrier": {"terms": {"field": "carrier"},
+           "aggs": {"revenue": {"sum": {"field": "order_info.total_price"}}}}}}
+}'
+```
+
+```json
+{"kind": "read", "status": 200, "tookMs": 72, "indices": ["shoppremiumoutlets.myshopify.com-shipment_summary-2024.09"],
+ "response": {"took": 54, "hits": {"total": {"value": 10000, "relation": "gte"}, "hits": []},
+              "aggregations": {"by_carrier": {"buckets": [{"key": "UPS", "doc_count": 3166, "revenue": {"value": 770530.77}}]}}}}
+```
+
+Allowed reads: `_search`, `_count`, `_msearch`, `_field_caps`, `_mapping`, `_settings`, `_validate/query`, `_explain`, `_doc`, `_source`, `_eql/search`, `_terms_enum`, `_alias`, `_stats` on an index or pattern; `_cat/indices|count|shards|aliases` (rows you can't see are removed), `_cat/health`, `_cat/nodes`, `_cluster/health`, `_resolve/index`, `_analyze`; GET (and `_simulate`) on `_index_template`, `_component_template`, `_ilm`, `_ingest` (cluster View); `_sql` (View on every index). A pattern that reaches an index you can't view is refused (`403`, with the indices), never silently narrowed. Scripts (`script`, `script_fields`, `runtime_mappings`, `scripted_metric`), `scroll`, and queries that fetch documents from another index (any `index` key in the body: terms lookup, `more_like_this` documents, indexed shapes) are for admins only (`LOOKUP_NOT_ALLOWED`); `size` is at most 10,000 and responses at most 5 MB.
+
+**Writes** go through the console's change flows. Send `"dryRun": true` first:
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -X POST \
+  http://172.0.58.49/api/v1/clusters/elkm2-prod/shell -d '{
+  "method": "POST", "path": "shoppremiumoutlets.myshopify.com-shipment_summary-2024.09/_update_by_query", "dryRun": true,
+  "body": {"query": {"term": {"carrier": "DHL"}}, "set": {"carrier": "DHL Express"}}
+}'
+```
+
+```json
+{"kind": "write", "op": "bulk.update", "label": "Bulk update documents", "dryRun": true,
+ "result": {"count": 3121, "willChange": 3121, "sample": ["…"], "dryRunToken": "eyJ…", "expiresInSeconds": 900},
+ "needs": {"reason": true, "count": 3121}, "approvalRequired": false}
+```
+
+Then the same request without `dryRun`, with `reason`, `dryRunToken` and `expectedCount` (3121). It returns `{"kind": "write", ..., "result": {"applied": true, "changeId": "…", "succeeded": 3121, ...}}`, or **202** `pendingApproval` for a non-admin.
+
+| Typed in the shell | Runs as |
+| --- | --- |
+| `PUT _cluster/settings` (`persistent` only) | cluster settings change (admins) |
+| `PUT <index>/_settings`, `PUT <index>/_mapping` | index settings / mapping change |
+| `PUT _index_template/<n>`, `_component_template/<n>`, `_ilm/policy/<n>`, `_ingest/pipeline/<n>` | template / policy / pipeline change |
+| `PUT <index>` / `DELETE <index>` (`confirm`) | create index / delete index |
+| `POST <index>/_doc`, `PUT <index>/_doc/<id>`, `PUT <index>/_create/<id>` | add or replace a document |
+| `POST <index>/_update/<id>` with `{"doc": {...}}` | edit a document (merged) |
+| `DELETE <index>/_doc/<id>` (`confirm`) | delete a document |
+| `POST <index>/_update_by_query` with `query` + `set` / `remove` | bulk update (no scripts) |
+| `POST <index>/_delete_by_query` with `query` | bulk delete |
+
+Anything else (`_reindex`, `_forcemerge`, `_close`, `_snapshot`, `_security`, transient settings…) answers `403 NOT_ALLOWED_IN_SHELL`. Audited as `SHELL_QUERY` with method, path, parameter names, indices and field / aggregation names, never values.
+
+### GET /api/v1/clusters/{clusterId}/shell/history
+
+Your last 50 requests on this cluster (method, path, body), newest first. Only you see them. `POST …/shell/history/_clear` forgets them.
+
 ## Admin API
 
 Admins only (users with `admin: true`, or listed in `BOOTSTRAP_ADMINS`). Every change made here is written to the audit log.
@@ -1225,7 +1391,7 @@ curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -X
 
 ### GET /api/v1/admin/audit
 
-Returns the audit events for one UTC day, newest first. Filter by `clusterId`, `user` or `action` (`UPDATE`, `ROLLBACK`, `DRY_RUN`, `ADMIN_USER_UPDATE`, `ADMIN_PERMISSIONS_UPDATE`, `ADMIN_USER_DELETE`, `ADMIN_ALLOWLIST_UPDATE`, `ADMIN_ALLOWLIST_DELETE`, `ADMIN_USER_CREATE`, `ADMIN_PASSWORD_RESET`, `ADMIN_CLUSTER_CREATE`, `ADMIN_CLUSTER_UPDATE`, `ADMIN_CLUSTER_DELETE`, `INDEX_DELETE`, `DATA_SEARCH`, `DATA_DOCUMENT`, `DATA_EXPORT`, `DATA_DOC_CREATE`, `DATA_DOC_UPDATE`, `DATA_DOC_DELETE`, `DATA_DOC_RESTORE`, `DATA_BULK_UPDATE`, `DATA_BULK_DELETE`, `DATA_BULK_RESTORE`, `RESTORE`, `INDEX_RECREATE`, `AUTH_LOGIN`, `AUTH_LOGOUT`, `AUTH_LOGOUT_ALL`, `AUTH_PASSWORD_CHANGE`); `limit` defaults to 200.
+Returns the audit events for one UTC day, newest first. Filter by `clusterId`, `user` or `action` (`UPDATE`, `ROLLBACK`, `DRY_RUN`, `ADMIN_USER_UPDATE`, `ADMIN_PERMISSIONS_UPDATE`, `ADMIN_USER_DELETE`, `ADMIN_ALLOWLIST_UPDATE`, `ADMIN_ALLOWLIST_DELETE`, `ADMIN_USER_CREATE`, `ADMIN_PASSWORD_RESET`, `ADMIN_CLUSTER_CREATE`, `ADMIN_CLUSTER_UPDATE`, `ADMIN_CLUSTER_DELETE`, `INDEX_DELETE`, `DATA_SEARCH`, `DATA_DOCUMENT`, `DATA_EXPORT`, `DATA_DOC_CREATE`, `DATA_DOC_UPDATE`, `DATA_DOC_DELETE`, `DATA_DOC_RESTORE`, `DATA_BULK_UPDATE`, `DATA_BULK_DELETE`, `DATA_BULK_RESTORE`, `RESTORE`, `INDEX_CREATE`, `INDEX_RECREATE`, `AUTH_LOGIN`, `AUTH_LOGOUT`, `AUTH_LOGOUT_ALL`, `AUTH_PASSWORD_CHANGE`); `limit` defaults to 200.
 
 ```bash
 curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' "http://172.0.58.49/api/v1/admin/audit?date=2026-09-29&clusterId=elkm2-prod&action=UPDATE"
@@ -1275,13 +1441,23 @@ Every error has the same shape: an HTTP status, a stable `code`, a readable `mes
 | 403 | `NOT_ALLOWLISTED` | A key, resource or index isn't on the allowlist; `details.blocked` lists which |
 | 403 | `ADMIN_REQUIRED` | Admin-only endpoint |
 | 403 | `SYSTEM_INDEX` | Data browser: names and patterns starting with `.` (system and hidden indices) can't be browsed |
+| 403 | `SELF_APPROVAL` | Another admin has to approve or reject your own request |
+| 403 | `SCRIPT_NOT_ALLOWED`, `LOOKUP_NOT_ALLOWED`, `NOT_ALLOWED_IN_SHELL`, `PARAM_NOT_ALLOWED` | Shell: scripts are for admins; that endpoint (or `scroll`) isn't available in the shell |
+| 400 | `COMMENT_REQUIRED`, `INVALID_CHANGE` | Reject needs a comment; a change whose dry run fails can't be sent for approval |
+| 400 | `TARGET_REQUIRED`, `INVALID_PATH`, `INVALID_BODY`, `SIZE_TOO_LARGE`, `TRANSIENT_NOT_SUPPORTED` | Shell: start the path with an index or pattern; give a JSON body (NDJSON for `_msearch`); `size` ≤ 10,000; use persistent settings |
+| 409 | `RESOURCE_CHANGED` | Approve: the resource changed since the request, so nothing was applied (the request is now `OUTDATED`) |
+| 409 | `REQUEST_CLOSED`, `REQUEST_BUSY`, `REQUESTER_GONE` | The request is no longer pending / another admin acted at the same moment / the requester's user was removed |
+| 413 | `RESPONSE_TOO_LARGE` | Shell: the response is over 5 MB; lower `size` or use `filter_path` / aggregations |
 | 404 | `CLUSTER_NOT_FOUND`, `INDEX_NOT_FOUND`, `RESOURCE_NOT_FOUND`, `USER_NOT_FOUND` | Check the id or name |
 | 404 | `VERSION_NOT_FOUND`, `CHANGE_NOT_FOUND` | That saved version, bulk change or config change doesn't exist (or belongs to another document or resource); config changes from before change history existed can't be restored |
 | 404 | `TOMBSTONE_NOT_FOUND` | No saved definition under that deleted-index key |
 | 404 | `DOCUMENT_NOT_FOUND` | Data browser: no document with that id in that index |
 | 404 | `NO_SNAPSHOT` | Nothing to roll back yet: no change has been made through the API |
 | 409 | `DOCUMENT_CHANGED` | The document was edited by someone else since you read it; reload it and try again |
-| 409 | `INDEX_EXISTS` | Recreate: an index, alias or data stream with that name exists again |
+| 409 | `INDEX_EXISTS` | Create / recreate: an index, alias or data stream with that name exists |
+| 409 | `INDEX_NOT_EMPTY`, `INDEX_REPLACED` | Undo create: the index already holds documents, or was deleted and created again since; use Delete index |
+| 422 | `DATA_STREAM_TEMPLATE` | Create: the name matches a template that creates data streams |
+| 400 | `INVALID_INDEX_BODY` | Create: Elasticsearch would refuse these settings / mappings (the message says why) |
 | 409 | `DOCUMENT_EXISTS` | A document with that id already exists; edit it instead |
 | 409 | `COUNT_CHANGED` | Documents matching the bulk change changed since the dry run; run it again |
 | 409 | `CLUSTER_EXISTS` | That cluster id is taken (by an added cluster or one in `clusters.yaml`) |

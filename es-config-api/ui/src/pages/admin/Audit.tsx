@@ -10,13 +10,14 @@ import { Badge, Empty, ErrorCallout, Loading, downloadFile } from "../../compone
 import { CONFIG_TYPE_LABEL, pretty, todayUtc, when } from "../../format";
 import { useClusters } from "../../session";
 
-const ACTIONS = ["UPDATE", "ROLLBACK", "RESTORE", "DRY_RUN", "INDEX_DELETE", "INDEX_RECREATE", "DATA_SEARCH", "DATA_EXPORT", "DATA_*", "ADMIN_*", "ADMIN_CLUSTER_*", "AUTH_*"];
+const ACTIONS = ["UPDATE", "ROLLBACK", "RESTORE", "DRY_RUN", "INDEX_CREATE", "INDEX_DELETE", "INDEX_RECREATE", "DATA_SEARCH", "DATA_EXPORT", "DATA_*", "APPROVAL_*", "SHELL_*", "ADMIN_*", "ADMIN_CLUSTER_*", "AUTH_*"];
 const OUTCOMES = ["SUCCESS", "REJECTED", "FAILED", "NO_CHANGE"];
 
 const HUMAN: Record<string, string> = {
   UPDATE: "Update",
   ROLLBACK: "Rollback",
   RESTORE: "Restore",
+  INDEX_CREATE: "Index created",
   INDEX_DELETE: "Index delete",
   INDEX_RECREATE: "Index recreated",
   AUTH_LOGIN: "Sign in",
@@ -36,6 +37,14 @@ const HUMAN: Record<string, string> = {
   DATA_SEARCH: "Data search",
   DATA_DOCUMENT: "Document viewed",
   DATA_EXPORT: "Data export",
+  APPROVAL_REQUESTED: "Approval requested",
+  APPROVAL_APPROVED: "Approved and applied",
+  APPROVAL_REJECTED: "Request rejected",
+  APPROVAL_CANCELLED: "Request cancelled",
+  APPROVAL_EXPIRED: "Request expired",
+  APPROVAL_OUTDATED: "Request outdated",
+  APPROVAL_FAILED: "Approved, failed",
+  SHELL_QUERY: "Shell query",
 };
 
 export function actionLabel(e: AuditEvent): string {

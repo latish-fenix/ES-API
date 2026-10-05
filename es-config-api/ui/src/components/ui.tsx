@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
-import { ApiError } from "../api";
+import { ApiError, PendingApproval } from "../api";
 import { Icon, type IconName } from "./icons";
 
 // ------------------------------------------------------------------ small bits
@@ -142,6 +142,7 @@ function explain(e: ApiError, ctx: { clusterId?: string; admin?: boolean }): Exp
 
 export function ErrorCallout({ error, clusterId, admin }: { error: unknown; clusterId?: string; admin?: boolean }) {
   if (!error) return null;
+  if (error instanceof PendingApproval) return <ApprovalSent approval={error.approval} />;
   if (!(error instanceof ApiError)) {
     return <Callout tone="danger" title="Something went wrong">{String((error as Error)?.message ?? error)}</Callout>;
   }
@@ -159,6 +160,23 @@ export function ErrorCallout({ error, clusterId, admin }: { error: unknown; clus
       </div>
     </Callout>
   );
+}
+
+/** Shown where an "applied" result would be: the change waits for an admin. */
+export function ApprovalSent({ approval }: { approval: { id: string; label: string; resource: string } }) {
+  return (
+    <Callout tone="info" icon="inbox" title="Sent to the admins for approval" role="status">
+      <div className="stack-sm" style={{ gap: 4 }}>
+        <span>Nothing has changed yet. {approval.label} <b>{approval.resource}</b> runs as soon as an admin approves it; you get an email either way.</span>
+        <span><Link to={`/requests/${encodeURIComponent(approval.id)}`}>Open the request</Link> · <Link to="/requests">All my requests</Link></span>
+      </div>
+    </Callout>
+  );
+}
+
+/** Label for the button that applies a change: non-admins send a request instead. */
+export function applyLabel(needsApproval: boolean | undefined, label: string): string {
+  return needsApproval ? "Request approval" : label;
 }
 
 export function errorMessage(e: unknown): string {

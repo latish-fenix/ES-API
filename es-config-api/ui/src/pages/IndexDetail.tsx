@@ -6,9 +6,10 @@ import { ChangeFlow, RollbackDialog, SnapshotDialog, StatusBadges } from "../com
 import { Icon } from "../components/icons";
 import { Page, useClusterCrumbs } from "../components/Shell";
 import { Callout, Empty, ErrorCallout, HealthDot, Loading, SearchInput } from "../components/ui";
-import { num, showValue } from "../format";
+import { num, showValue, when } from "../format";
 import { useCluster, useHealth } from "../session";
 import { DeleteIndexDialog } from "./Indices";
+import { RollbackDialog as UndoDialog } from "./Rollback";
 
 interface Field {
   path: string;
@@ -45,6 +46,13 @@ export function IndexDetail() {
   const health = useHealth(clusterId).data;
   const rows = useQuery({ queryKey: ["indices", clusterId], queryFn: () => get<{ items: IndexRow[] }>(`/clusters/${enc(clusterId)}/indices`).then((r) => r.items) });
   const info = rows.data?.find((r) => r.index === index);
+  const [undoing, setUndoing] = useState(false);
+  const created = useQuery({
+    queryKey: ["index-created", clusterId, index],
+    queryFn: () => get<{ changeId: string; at: string; by: string; reason: string | null; canUndo: boolean; docs: number | null }>(
+      `/clusters/${enc(clusterId)}/indices/${enc(index)}/_created`),
+    retry: false,
+  });
   const c = `/c/${enc(clusterId)}`;
   const crumbs = useClusterCrumbs(clusterId, { label: "Indices", to: `${c}/indices` }, { label: index });
 
@@ -65,11 +73,21 @@ export function IndexDetail() {
         </div>
         {canIndex(index, "delete") && <button type="button" className="btn" style={{ color: "var(--danger)" }} onClick={() => setDeleting(true)}><Icon name="trash" /> Delete index</button>}
       </div>
+      {created.data?.canUndo && (
+        <Callout icon="undo" title="Created in the console and still empty">
+          {created.data.by} created it {when(created.data.at)}{created.data.reason ? ` (“${created.data.reason}”)` : ""}. While it has no documents, <strong>Roll back</strong> deletes it again.
+          <div style={{ marginTop: 8 }}><button type="button" className="btn btn-sm" onClick={() => setUndoing(true)}><Icon name="undo" size={14} /> Roll back creation</button></div>
+        </Callout>
+      )}
       <div className="tabs" role="tablist" aria-label="Index configuration" style={{ alignSelf: "flex-start" }}>
         <Link role="tab" className={`tab ${part === "settings" ? "active" : ""}`} aria-selected={part === "settings"} to={`${c}/indices/${enc(index)}/settings`}>Settings</Link>
         <Link role="tab" className={`tab ${part === "mapping" ? "active" : ""}`} aria-selected={part === "mapping"} to={`${c}/indices/${enc(index)}/mapping`}>Mapping</Link>
       </div>
       {part === "settings" ? <SettingsTab key={index} clusterId={clusterId} index={index} canEdit={canIndex(index, "edit")} admin={admin} /> : <MappingTab key={index} clusterId={clusterId} index={index} canEdit={canIndex(index, "edit")} admin={admin} />}
+      {undoing && created.data && (
+        <UndoDialog target={{ kind: "create", clusterId, index, changeId: created.data.changeId, label: `the creation of index ${index}`,
+          detail: `${created.data.by}, ${when(created.data.at)}` }} onClose={() => setUndoing(false)} onDone={() => navigate(`${c}/indices`)} />
+      )}
       {deleting && <DeleteIndexDialog clusterId={clusterId} index={index} onClose={() => setDeleting(false)} onDeleted={() => navigate(`${c}/indices`)} />}
     </Page>
   );

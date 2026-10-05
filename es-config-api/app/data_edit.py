@@ -68,6 +68,23 @@ class BulkBody(SearchBody):
     reason: str | None = Field(None, max_length=1000)
     dryRunToken: str | None = Field(None, description="From the dry run of this exact request")
     expectedCount: int | None = Field(None, description="The count the dry run reported")
+    dsl: dict | None = Field(None, description="Elasticsearch query DSL (the 'query' object) used instead of "
+                                               "query/filters/timeRange; no scripts")
+
+    @field_validator("dsl")
+    @classmethod
+    def _dsl(cls, v: dict | None) -> dict | None:
+        if v is not None:
+            from .util import script_paths
+            if not v:
+                raise ValueError("dsl must be a non-empty query object, e.g. {\"term\": {\"status\": \"new\"}}")
+            if script_paths(v):
+                raise ValueError(f"scripts are not allowed in bulk changes ({', '.join(script_paths(v)[:3])})")
+            from .util import index_refs
+            if index_refs(v):
+                raise ValueError("queries that fetch documents from another index (terms lookup, more_like_this "
+                                 f"documents…) are not allowed in bulk changes ({', '.join(index_refs(v)[:3])})")
+        return v
 
     @field_validator("remove")
     @classmethod
@@ -480,7 +497,7 @@ class DataEditor:
     # -- bulk ----------------------------------------------------------------
     @staticmethod
     def _spec(op: str, cluster_id: str, target: str, body: BulkBody) -> dict:
-        return {"op": op, "cluster": cluster_id, "target": target, "query": body.query,
+        return {"op": op, "cluster": cluster_id, "target": target, "query": body.query, "dsl": body.dsl,
                 "filters": [f.model_dump(exclude_none=True) for f in body.filters],
                 "timeRange": body.timeRange.model_dump(exclude_none=True) if body.timeRange else None,
                 "set": body.set if op == "update" else None, "remove": body.remove if op == "update" else None}
@@ -503,7 +520,7 @@ class DataEditor:
                     _check_field(f)
             spec = self._spec(op, cluster_id, t, body)
             spec_h = hashlib.sha256(canonical_json(spec).encode()).hexdigest()
-            query = build_query(body)
+            query = body.dsl if body.dsl else build_query(body)
             r = _read(es, "POST", f"/{_expr(t)}/_search", body={
                 "query": scope.narrow(query), "size": BULK_MAX, "track_total_hits": True,
                 "seq_no_primary_term": True, "sort": ["_doc"], "timeout": "60s"},
@@ -526,7 +543,8 @@ class DataEditor:
                 if canonical_json(new) != canonical_json(h.get("_source") or {}):
                     plans.append((h, new))
             warnings = []
-            if not body.query.strip() and not body.filters and not body.timeRange:
+            if (body.dsl == {"match_all": {}}) or (not body.dsl and not body.query.strip() and not body.filters
+                                                   and not body.timeRange):
                 warnings.append("No query, filter or time range: this matches every document in "
                                 f"'{t}'")
             sample = [{"_index": h["_index"], "_id": h["_id"],
@@ -687,6 +705,10 @@ class DataEditor:
 
 
 def _search_audit(body: SearchBody) -> dict:
+    dsl = getattr(body, "dsl", None)
+    if dsl:
+        from .util import dsl_names
+        return {"dsl": dsl_names(dsl)["fields"]}
     return {"query": body.query or None,
             "filters": [f.model_dump(exclude_none=True) for f in body.filters] or None,
             "timeRange": body.timeRange.model_dump(exclude_none=True) if body.timeRange else None}
