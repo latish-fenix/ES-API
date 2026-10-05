@@ -409,7 +409,7 @@ Every admin gets an email for each new request, with a **Review the request** li
 
 1. Click **Review**. The page shows who asked, the reason, and the dry run: the same diff, document count or sample the requester saw.
 2. Optional: **Check again now** runs the dry run again, as the requester. *Still the same change* means approving will apply exactly this.
-3. **Approve and apply** (a comment is optional) runs the change as the requester, with the usual snapshot or backup. Or **Reject** with a comment (required); the requester gets it by email.
+3. **Approve and apply** (with a comment saying why: required) runs the change as the requester, with the usual snapshot or backup. Or **Reject** with a comment (required); the requester gets it by email.
 
 ![Review a request](images/43-review-request.png)
 

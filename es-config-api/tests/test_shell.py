@@ -181,7 +181,7 @@ def test_shell_writes_wait_for_approval(env, client, es, prefix, open_allowlist)
     assert r.status_code == 202 and r.json()["pendingApproval"], r.text
     assert "index.refresh_interval" not in es("GET", f"/{idx}/_settings", params={"flat_settings": "true"})[idx]["settings"]
     rid = r.json()["approval"]["id"]
-    assert client.post(f"/api/v1/approvals/{rid}/_approve", headers=ROOT).json()["status"] == "APPLIED"
+    assert client.post(f"/api/v1/approvals/{rid}/_approve", json={"comment": "ok"}, headers=ROOT).json()["status"] == "APPLIED"
     assert es("GET", f"/{idx}/_settings", params={"flat_settings": "true"})[idx]["settings"]["index.refresh_interval"] == "23s"
     # reads are never held
     r = client.post(SH, json={"method": "POST", "path": f"{idx}/_count"}, headers=ed)

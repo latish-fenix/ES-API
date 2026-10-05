@@ -252,7 +252,7 @@ function DecideDialog({ r, mode, onClose }: { r: ApprovalRequest; mode: "approve
     },
     onError: () => qc.invalidateQueries({ queryKey: ["approvals"] }),
   });
-  const ok = mode === "approve" || comment.trim().length > 0;
+  const ok = comment.trim().length > 0;
   return (
     <Dialog title={mode === "approve" ? "Approve and apply" : "Reject request"} subtitle={`${r.label} · ${r.resource}`} onClose={onClose} busy={run.isPending}
       footer={<>
@@ -268,8 +268,8 @@ function DecideDialog({ r, mode, onClose }: { r: ApprovalRequest; mode: "approve
           <span>Nothing is changed. <b>{r.requestedBy}</b> gets an email with your comment.</span>
         )}
         <label className="field">
-          <span className="label">Comment{mode === "reject" ? " (required)" : " (optional)"}</span>
-          <textarea className="textarea" rows={3} value={comment} onChange={(e) => setComment(e.target.value)} placeholder={mode === "reject" ? "Why, and what to do instead" : "e.g. OK for today's import"} autoFocus />
+          <span className="label">Comment (required)</span>
+          <textarea className="textarea" rows={3} value={comment} onChange={(e) => setComment(e.target.value)} placeholder={mode === "reject" ? "Why, and what to do instead" : "Why it is approved, e.g. OK for today's import"} autoFocus />
         </label>
         <ErrorCallout error={run.error} />
       </div>

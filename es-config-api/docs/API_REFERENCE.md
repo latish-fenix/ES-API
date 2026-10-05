@@ -994,7 +994,7 @@ Admins: runs the dry run again now, as the requester, and says whether it is sti
 
 ### POST /api/v1/approvals/{id}/_approve
 
-Admins, not on their own request. Body `{"comment": "..."}` (optional). Returns the request with `status` and `applyResult` (what the change itself returned). `409 RESOURCE_CHANGED` when it changed since the request (the request is then `OUTDATED`); `409 REQUEST_CLOSED` when it is no longer pending; `409 REQUEST_BUSY` when another admin acted at the same moment.
+Admins, not on their own request. Body `{"comment": "why"}` (required, `COMMENT_REQUIRED` otherwise; audited and emailed to the requester). Returns the request with `status` and `applyResult` (what the change itself returned). `409 RESOURCE_CHANGED` when it changed since the request (the request is then `OUTDATED`); `409 REQUEST_CLOSED` when it is no longer pending; `409 REQUEST_BUSY` when another admin acted at the same moment.
 
 ```bash
 curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -X POST \
@@ -1443,7 +1443,7 @@ Every error has the same shape: an HTTP status, a stable `code`, a readable `mes
 | 403 | `SYSTEM_INDEX` | Data browser: names and patterns starting with `.` (system and hidden indices) can't be browsed |
 | 403 | `SELF_APPROVAL` | Another admin has to approve or reject your own request |
 | 403 | `SCRIPT_NOT_ALLOWED`, `LOOKUP_NOT_ALLOWED`, `NOT_ALLOWED_IN_SHELL`, `PARAM_NOT_ALLOWED` | Shell: scripts are for admins; that endpoint (or `scroll`) isn't available in the shell |
-| 400 | `COMMENT_REQUIRED`, `INVALID_CHANGE` | Reject needs a comment; a change whose dry run fails can't be sent for approval |
+| 400 | `COMMENT_REQUIRED`, `INVALID_CHANGE` | Approve and reject need a comment; a change whose dry run fails can't be sent for approval |
 | 400 | `TARGET_REQUIRED`, `INVALID_PATH`, `INVALID_BODY`, `SIZE_TOO_LARGE`, `TRANSIENT_NOT_SUPPORTED` | Shell: start the path with an index or pattern; give a JSON body (NDJSON for `_msearch`); `size` ≤ 10,000; use persistent settings |
 | 409 | `RESOURCE_CHANGED` | Approve: the resource changed since the request, so nothing was applied (the request is now `OUTDATED`) |
 | 409 | `REQUEST_CLOSED`, `REQUEST_BUSY`, `REQUESTER_GONE` | The request is no longer pending / another admin acted at the same moment / the requester's user was removed |

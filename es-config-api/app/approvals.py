@@ -460,6 +460,8 @@ class ApprovalService:
         return {"id": rid, "upToDate": _fingerprint(op, now) == rec["fingerprint"], "preview": _strip(now)}
 
     def approve(self, app, admin: User, meta, rid: str, comment: str | None) -> dict:
+        if not (comment and comment.strip()):
+            raise bad_request("COMMENT_REQUIRED", "Say why it is approved (it is audited and the requester gets it by email)")
         rec, etag = self.get(rid)
         self._can_decide(admin, rec)
         op = OPS[rec["op"]]

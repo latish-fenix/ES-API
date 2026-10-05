@@ -13,7 +13,7 @@ router = APIRouter(prefix="/api/v1/approvals", tags=["approvals"])
 
 
 class DecisionBody(BaseModel):
-    comment: str | None = Field(None, max_length=1000, description="Optional on approve; required on reject")
+    comment: str | None = Field(None, max_length=1000, description="Why: required on approve and on reject")
 
 
 def _svc(request: Request):
@@ -45,7 +45,7 @@ def recheck(request_id: str, request: Request, user: User = Depends(require_admi
     return _svc(request).recheck(request.app, user, meta(request), request_id)
 
 
-@router.post("/{request_id}/_approve", summary="Admins: approve and apply (as the requester)")
+@router.post("/{request_id}/_approve", summary="Admins: approve and apply (as the requester; comment required)")
 def approve(request_id: str, request: Request, body: DecisionBody = Body(default_factory=DecisionBody),
             user: User = Depends(require_admin)):
     return _svc(request).approve(request.app, user, meta(request), request_id, body.comment)

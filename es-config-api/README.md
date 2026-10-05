@@ -281,7 +281,7 @@ The Elasticsearch service account needs the `read` and `write` index privileges 
 **Approvals** (see "Approvals" below): a non-admin's real (non dry-run) write answers
 `202 {"pendingApproval": true, "approval": {...}}`. `GET /approvals?scope=mine|pending|all`,
 `GET /approvals/_count`, `GET /approvals/{id}`, `POST /approvals/{id}/_recheck`,
-`/_approve` (comment optional), `/_reject` (comment required), `/_cancel` (the requester).
+`/_approve` and `/_reject` (comment required on both), `/_cancel` (the requester).
 
 **Shell:** `POST /clusters/{id}/shell` with `{method, path, body}` (plus `dryRun`, `reason`,
 `confirm`, `dryRunToken`, `expectedCount` for writes); `GET /clusters/{id}/shell/history`,
@@ -331,8 +331,8 @@ writes typed in the shell. Dry runs and reads never wait. Admins' own changes ap
    the reason, the field names or document count, and a link to the request. Values are never
    in the email. One message per admin, so one refused address doesn't block the others; the
    result is shown on the request.
-3. An admin opens **Requests**, sees the full dry-run result, and approves (comment optional) or
-   rejects (comment required). An admin can't decide their own request. On approve the dry run
+3. An admin opens **Requests**, sees the full dry-run result, and approves or
+   rejects; a comment is required either way. An admin can't decide their own request. On approve the dry run
    runs once more as the requester and must give the same result (same diff and version, same
    document count…). If something changed in between, nothing is applied and the request closes
    as `OUTDATED`. Otherwise the change runs as the requester with the usual locks, snapshots,

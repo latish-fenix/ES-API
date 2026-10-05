@@ -66,8 +66,10 @@ def test_settings_change_waits_then_applies(env, client, es, prefix, mail):
     assert client.get(f"/api/v1/approvals/{rid}", headers=as_user("looker")).status_code == 403
     full = client.get(f"/api/v1/approvals/{rid}", headers=ROOT).json()
     assert full["canApprove"] and full["preview"]["diff"]["added"][0]["after"] == "31s"
-    assert client.post(f"/api/v1/approvals/{rid}/_approve", headers=dev).status_code == 403
+    assert client.post(f"/api/v1/approvals/{rid}/_approve", json={"comment": "ok"}, headers=dev).status_code == 403
     assert client.post(f"/api/v1/approvals/{rid}/_recheck", headers=ROOT).json()["upToDate"] is True
+    r = client.post(f"/api/v1/approvals/{rid}/_approve", json={"comment": "  "}, headers=ROOT)
+    assert r.status_code == 400 and r.json()["error"]["code"] == "COMMENT_REQUIRED"
     # approve: applied as the requester, the audit says who approved
     mail.messages.clear()
     r = client.post(f"/api/v1/approvals/{rid}/_approve", json={"comment": "ok for today"}, headers=ROOT)
@@ -81,7 +83,7 @@ def test_settings_change_waits_then_applies(env, client, es, prefix, mail):
     assert _audit(client, action="APPROVAL_APPROVED", approvalId=rid)
     assert [m["to"] for m in mail.messages] == [DEV] and "Approved and applied" in mail.messages[0]["subject"]
     # closed: can't approve twice; history shows it
-    assert client.post(f"/api/v1/approvals/{rid}/_approve", headers=ROOT).json()["error"]["code"] == "REQUEST_CLOSED"
+    assert client.post(f"/api/v1/approvals/{rid}/_approve", json={"comment": "ok"}, headers=ROOT).json()["error"]["code"] == "REQUEST_CLOSED"
     assert client.get("/api/v1/approvals/_count", headers=ROOT).json()["pending"] == 0
     hist = client.get(f"{API}/config-history", params={"configType": "index-settings", "resource": idx},
                       headers=ROOT).json()["items"]
@@ -107,7 +109,7 @@ def test_outdated_reject_cancel_expire(env, client, es, prefix, mail):
     rid = ask("40s")
     client.put(url, json={"config": {"refresh_interval": "7s"}, "reason": "hotfix"}, headers=ROOT)
     assert client.post(f"/api/v1/approvals/{rid}/_recheck", headers=ROOT).json()["upToDate"] is False
-    r = client.post(f"/api/v1/approvals/{rid}/_approve", headers=ROOT)
+    r = client.post(f"/api/v1/approvals/{rid}/_approve", json={"comment": "ok"}, headers=ROOT)
     assert r.status_code == 409 and r.json()["error"]["code"] == "RESOURCE_CHANGED", r.text
     s = es("GET", f"/{idx}/_settings", params={"flat_settings": "true"})[idx]["settings"]
     assert s["index.refresh_interval"] == "7s"
@@ -125,7 +127,7 @@ def test_outdated_reject_cancel_expire(env, client, es, prefix, mail):
     rid = ask("42s")
     assert client.post(f"/api/v1/approvals/{rid}/_cancel", headers=ROOT).status_code == 403
     assert client.post(f"/api/v1/approvals/{rid}/_cancel", headers=dev).json()["status"] == "CANCELLED"
-    assert client.post(f"/api/v1/approvals/{rid}/_approve", headers=ROOT).json()["error"]["code"] == "REQUEST_CLOSED"
+    assert client.post(f"/api/v1/approvals/{rid}/_approve", json={"comment": "ok"}, headers=ROOT).json()["error"]["code"] == "REQUEST_CLOSED"
 
     # expiry
     rid = ask("43s")
@@ -162,7 +164,7 @@ def test_documents_and_bulk_through_approval(env, client, es, prefix, mail):
     rid = r.json()["approval"]["id"]
     assert r.json()["approval"]["resource"] == f"{idx}/o1"
     assert es("GET", f"/{idx}/_doc/o1")["_source"]["status"] == "new"
-    assert client.post(f"/api/v1/approvals/{rid}/_approve", headers=ROOT).json()["status"] == "APPLIED"
+    assert client.post(f"/api/v1/approvals/{rid}/_approve", json={"comment": "ok"}, headers=ROOT).json()["status"] == "APPLIED"
     assert es("GET", f"/{idx}/_doc/o1")["_source"]["status"] == "paid"
     hist = client.get(f"{data}/_doc/o1/_history", headers=dev).json()["items"]
     assert hist[0]["by"] == DEV
@@ -183,7 +185,7 @@ def test_documents_and_bulk_through_approval(env, client, es, prefix, mail):
     rid = r.json()["approval"]["id"]
     assert r.json()["approval"]["summary"] == {"count": 5, "fields": ["status"], "fieldCount": 1}
     assert "archived" not in str(mail.messages[-1])
-    r = client.post(f"/api/v1/approvals/{rid}/_approve", headers=ROOT)
+    r = client.post(f"/api/v1/approvals/{rid}/_approve", json={"comment": "ok"}, headers=ROOT)
     assert r.status_code == 200 and r.json()["result"]["succeeded"] == 5, r.text
     es("POST", f"/{idx}/_refresh")
     assert es("POST", f"/{idx}/_count", json={"query": {"term": {"status": "archived"}}})["count"] == 5
@@ -198,7 +200,7 @@ def test_documents_and_bulk_through_approval(env, client, es, prefix, mail):
                                                     "expectedCount": dry["count"]}, headers=dev)
     rid = r.json()["approval"]["id"]
     es("PUT", f"/{idx}/_doc/o9", json={"status": "archived"}, params={"refresh": "true"})
-    r = client.post(f"/api/v1/approvals/{rid}/_approve", headers=ROOT)
+    r = client.post(f"/api/v1/approvals/{rid}/_approve", json={"comment": "ok"}, headers=ROOT)
     assert r.status_code == 409 and r.json()["error"]["code"] == "RESOURCE_CHANGED"
     assert es("POST", f"/{idx}/_count", json={"query": {"term": {"status": "gone"}}})["count"] == 0
 
@@ -215,7 +217,7 @@ def test_index_create_and_delete_through_approval(env, client, es, prefix, mail,
     assert r.status_code == 202, r.text
     rid = r.json()["approval"]["id"]
     assert es("GET", f"/{name}", ok=False).get("status") == 404
-    assert client.post(f"/api/v1/approvals/{rid}/_approve", headers=ROOT).json()["status"] == "APPLIED"
+    assert client.post(f"/api/v1/approvals/{rid}/_approve", json={"comment": "ok"}, headers=ROOT).json()["status"] == "APPLIED"
     assert name in es("GET", f"/{name}")
     # a delete request must carry the typed confirmation; then the admin approves
     r = client.delete(f"{API}/indices/{name}", params={"reason": "wrong name", "confirm": name}, headers=dev)
@@ -225,7 +227,7 @@ def test_index_create_and_delete_through_approval(env, client, es, prefix, mail,
     r = client.delete(f"{API}/indices/{name}", params={"reason": "wrong name", "confirm": name}, headers=dev)
     assert r.status_code == 202, r.text
     rid = r.json()["approval"]["id"]
-    r = client.post(f"/api/v1/approvals/{rid}/_approve", headers=ROOT)
+    r = client.post(f"/api/v1/approvals/{rid}/_approve", json={"comment": "ok"}, headers=ROOT)
     assert r.json()["status"] == "APPLIED", r.text
     assert es("GET", f"/{name}", ok=False).get("status") == 404
     tomb = client.get(f"{API}/deleted-indices", params={"index": name}, headers=ROOT).json()["items"]
