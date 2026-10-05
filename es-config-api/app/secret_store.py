@@ -111,8 +111,7 @@ class AwsSecretStore:
     def full_name(self, name: str) -> str:
         return _check(f"{self.prefix}{name}")
 
-    @staticmethod
-    def _read(sm, full: str) -> dict | None:
+    def _read(self, sm, full: str) -> dict | None:
         try:
             resp = sm.get_secret_value(SecretId=full)
             return json.loads(resp.get("SecretString") or "{}")
@@ -122,14 +121,27 @@ class AwsSecretStore:
                 return None
             if code == "InvalidRequestException" and "delet" in str(e).lower():
                 return None                          # scheduled for deletion: treat as gone
-            raise _aws_error("read", full, e) from e
+            raise _aws_error("read", full, e, self._region_of(sm)) from e
+
+    def _region_of(self, sm) -> str | None:
+        return self.legacy_region if sm is self.legacy and sm is not None else self.region
 
     def get(self, name: str) -> dict | None:
         full = self.full_name(name)
         cached, value = self.cache.get(full)
         if cached:
             return value
-        value = self._read(self.sm, full)
+        try:
+            value = self._read(self.sm, full)
+        except ApiError as e:
+            # While the IAM policy doesn't cover the new region yet, keep working from the old one
+            # (reads only; a change still needs the new region and fails with this error).
+            if self.legacy is None or e.code != "SECRETS_ACCESS_DENIED":
+                raise
+            log.error("No access to %s in %s (%s); reading it from %s. Add %s to the "
+                      "SecretsManagerOwnPrefixOnly statement of the EC2 role", full, self.region,
+                      (e.details or {}).get("awsMessage", ""), self.legacy_region, self.region)
+            value = None
         where = self.region if value is not None else None
         if value is None and self.legacy is not None:
             value = self._read(self.legacy, full)
@@ -162,15 +174,15 @@ class AwsSecretStore:
                 try:
                     self.sm.create_secret(**kwargs)
                 except ClientError as e2:
-                    raise _aws_error("create", full, e2) from e2
+                    raise _aws_error("create", full, e2, self.region) from e2
             elif code == "InvalidRequestException" and "delet" in str(e).lower():
                 try:
                     self.sm.restore_secret(SecretId=full)
                     self.sm.put_secret_value(SecretId=full, SecretString=body)
                 except ClientError as e2:
-                    raise _aws_error("restore", full, e2) from e2
+                    raise _aws_error("restore", full, e2, self.region) from e2
             else:
-                raise _aws_error("write", full, e) from e
+                raise _aws_error("write", full, e, self.region) from e
 
     def _retire_legacy(self, full: str) -> bool:
         """Schedule the legacy-region copy for deletion (recoverable for 7 days).
@@ -254,14 +266,16 @@ class AwsSecretStore:
         return "moved"
 
 
-def _aws_error(what: str, name: str, e: ClientError) -> ApiError:
+def _aws_error(what: str, name: str, e: ClientError, region: str | None = None) -> ApiError:
     code = e.response["Error"]["Code"]
     msg = e.response["Error"].get("Message", str(e))
+    where = f" ({region})" if region else ""
     if code in ("AccessDeniedException", "AccessDenied", "UnrecognizedClientException"):
         return ApiError(500, "SECRETS_ACCESS_DENIED",
-                        f"The API may not {what} secret '{name}' in AWS Secrets Manager: add the "
-                        "secretsmanager permissions from docs/iam-policy.json to the EC2 role",
-                        {"awsError": code})
+                        f"The API may not {what} secret '{name}' in AWS Secrets Manager{where}: add the "
+                        "secretsmanager permissions from docs/iam-policy.json to the EC2 role"
+                        + (f" for {region}" if region else ""),
+                        {"awsError": code, "awsMessage": msg[:500], "region": region})
     return ApiError(502, "SECRETS_UNAVAILABLE",
                     f"AWS Secrets Manager could not {what} '{name}': {msg}", {"awsError": code})
 

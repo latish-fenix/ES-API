@@ -84,3 +84,37 @@ def test_password_change_moves_the_user_secret(tmp_path):
         users.set_password("dev@x.com", hash_password("New-Pass-2026x"), False, "dev@x.com")
         assert store.where("users/dev@x.com") == "us-west-2"
         assert _deleted(east, "r/users/dev@x.com")
+
+
+def test_no_access_to_the_new_region_falls_back_for_reads():
+    from botocore.exceptions import ClientError
+
+    from app.errors import ApiError
+
+    class Denied:
+        meta = type("M", (), {"region_name": "us-west-2"})()
+
+        def get_secret_value(self, **kw):
+            raise ClientError({"Error": {"Code": "AccessDeniedException", "Message": "no identity-based policy allows"}},
+                              "GetSecretValue")
+
+        put_secret_value = get_secret_value
+
+    with mock_aws():
+        east = boto3.client("secretsmanager", region_name="us-east-1")
+        east.create_secret(Name="r/app", SecretString=json.dumps({"sessionSecret": "s" * 64}))
+        store = AwsSecretStore("r/", region="us-west-2", client=Denied(), legacy_region="us-east-1",
+                               legacy_client=east, cache_seconds=0)
+        assert store.get("app") == {"sessionSecret": "s" * 64}          # still starts and signs in
+        assert store.get("users/none") is None
+        try:
+            store.put("app", {"sessionSecret": "x"})
+            raise AssertionError("write should fail")
+        except ApiError as e:
+            assert e.code == "SECRETS_ACCESS_DENIED" and "us-west-2" in e.message
+        nolegacy = AwsSecretStore("r/", region="us-west-2", client=Denied(), cache_seconds=0)
+        try:
+            nolegacy.get("app")
+            raise AssertionError("should fail without a legacy region")
+        except ApiError as e:
+            assert e.details["region"] == "us-west-2" and "identity-based" in e.details["awsMessage"]
