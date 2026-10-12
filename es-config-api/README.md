@@ -1,7 +1,7 @@
 # ES Config API
 
-Get, update, dry-run and roll back configuration on self-managed Elasticsearch 8.17
-clusters, one cluster per request. Every change is snapshotted to S3 before it is
+Get, update, dry-run and roll back configuration on self-managed Elasticsearch clusters
+(built on 8.17; 7.x works too, see *Older clusters* below), one cluster per request. Every change is snapshotted to S3 before it is
 applied, and every action is written to an audit log in S3.
 
 - **Config types:** cluster settings (persistent), index settings (dynamic), index
@@ -573,7 +573,17 @@ Elasticsearch 8.17.1 and start the API; then use the console at `http://localhos
 
 **UI:** `cd ui && npm ci && npm run build` (or `npm run dev`); see `ui/README.md`.
 
-The tests run against a **real** Elasticsearch 8.17 cluster; S3 is mocked with moto.
+The tests run against a **real** Elasticsearch cluster (8.17, and also pass on 7.9.1); S3 is
+mocked with moto.
+
+**Older clusters (7.x, OpenSearch).** The API talks to every cluster the same way, so no
+setting is needed. On the first request it notices a cluster that doesn't speak 8.x (no
+`X-Elastic-Product` header, or the 8.x media type refused) and from then on sends plain
+`application/json` to that cluster. The connection test shows the version and a warning
+for anything older than 8.x. Features that need a newer Elasticsearch than the cluster has
+(runtime fields need 7.11, `_terms_enum` in the Shell needs 7.14) return Elasticsearch's own
+error. Clusters older than 7.0 connect, but mapping types make edits unreliable there, so
+give users view access only.
 
 ```bash
 pip install -r requirements-dev.txt

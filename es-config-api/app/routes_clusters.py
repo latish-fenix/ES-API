@@ -18,7 +18,7 @@ from urllib.parse import urlparse
 from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, Field
 
-from .clusters import ClusterConfig, build_client, es_call, parse_cluster
+from .clusters import ClusterConfig, build_client, es_call, is_legacy, parse_cluster
 from .errors import ApiError, bad_request, unprocessable
 from .identity import User, require_admin
 from .util import iso
@@ -155,6 +155,29 @@ def _item(cid: str, body: ClusterFields, stored: dict | None, admin: User) -> di
     return item
 
 
+def _version_warnings(info: dict, version: str | None, legacy: bool) -> dict:
+    v = info.get("version") or {}
+    if v.get("distribution") == "opensearch":
+        return {"warnings": [f"This is OpenSearch {version}, not Elasticsearch. Connected in "
+                             "compatibility mode; most pages work, but some (data streams, ILM, "
+                             "EQL, terms enum) won't."]}
+    try:
+        major, minor = (int(x) for x in (version or "").split(".")[:2])
+    except ValueError:
+        return {}
+    if major >= 8:
+        return {}
+    if major < 7:
+        return {"warnings": [f"Elasticsearch {version} is older than 7.x. Index mappings still "
+                             "have types in this version, so editing mappings, templates and "
+                             "documents may fail. Use read-only access for this cluster."]}
+    msg = f"Elasticsearch {version}: this API is built and tested for 8.x."
+    if legacy:
+        msg += " Connected in compatibility mode (plain JSON); features newer than " \
+               f"{major}.{minor} return an error from Elasticsearch."
+    return {"warnings": [msg]}
+
+
 def test_connection(cfg: ClusterConfig, password: str | None = None, api_key: str | None = None) -> dict:
     """Connect with these settings (a throwaway client) and report what we found."""
     if cfg.auth_type == "basic" and not (password or cfg.password) or \
@@ -173,9 +196,9 @@ def test_connection(cfg: ClusterConfig, password: str | None = None, api_key: st
             out.update(health=h.get("status"), numberOfNodes=h.get("number_of_nodes"))
         except ApiError as e:
             out["warnings"] = [f"Connected, but _cluster/health failed: {e.message}"]
-        if version and not version.startswith("8."):
-            out.setdefault("warnings", []).append(
-                f"Elasticsearch {version}: this API is built and tested for 8.x")
+        out.update(compatibilityMode="legacy" if is_legacy(es) else "8.x")
+        for w in _version_warnings(info, version, is_legacy(es)).get("warnings", []):
+            out.setdefault("warnings", []).append(w)
     except ApiError as e:
         out.update(error=e.message, errorCode=e.code)
     finally:

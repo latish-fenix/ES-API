@@ -152,6 +152,7 @@ export interface ConnectionTest {
   clusterUuid?: string;
   health?: string;
   numberOfNodes?: number;
+  compatibilityMode?: "8.x" | "legacy";
   warnings?: string[];
   error?: string;
   errorCode?: string;

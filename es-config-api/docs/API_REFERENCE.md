@@ -1148,7 +1148,14 @@ curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -X
 ```
 
 ```json
-{"reachable": true, "version": "8.17.1", "clusterName": "elkm2-staging", "clusterUuid": "hmvz4z0AQP-69TruOsjhzA", "health": "green", "numberOfNodes": 1}
+{"reachable": true, "version": "8.17.1", "clusterName": "elkm2-staging", "clusterUuid": "hmvz4z0AQP-69TruOsjhzA", "health": "green", "numberOfNodes": 1, "compatibilityMode": "8.x"}
+```
+
+An older cluster (7.x) connects too. `compatibilityMode` is `legacy` when the API had to fall back to plain JSON for it:
+
+```json
+{"reachable": true, "version": "7.9.1", "clusterName": "prod-bombas-order-processor-1", "health": "green", "numberOfNodes": 3, "compatibilityMode": "legacy",
+ "warnings": ["Elasticsearch 7.9.1: this API is built and tested for 8.x. Connected in compatibility mode (plain JSON); features newer than 7.9 return an error from Elasticsearch."]}
 ```
 
 Wrong password:

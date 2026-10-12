@@ -24,6 +24,8 @@ import yaml
 from elasticsearch import Elasticsearch
 from elasticsearch import ApiError as EsApiError
 from elasticsearch import TransportError as EsTransportError
+from elasticsearch import UnsupportedProductError
+from elasticsearch.exceptions import HTTP_EXCEPTIONS
 
 from .errors import ApiError, not_found
 
@@ -504,12 +506,86 @@ NDJSON_HEADERS = {
 }
 
 
+# --------------------------------------------------------------- older clusters
+# The 8.x client asks for 8.x-style responses ("compatible-with=8") and refuses any server
+# that doesn't send "X-Elastic-Product: Elasticsearch" (added in 7.14). Older clusters
+# (7.x before 7.14, and OpenSearch) fail one or both. When we see that, the client's
+# transport is marked "legacy" and later requests go straight to the transport with plain
+# application/json, skipping the product check. options() copies share the transport, so
+# the mark covers them too.
+_LEGACY_ATTR = "_esc_legacy"
+_MEDIA_TYPE_HINTS = ("media_type_header_exception", "media-type", "content-type header",
+                     "compatible-with")
+
+
+def is_legacy(es: Elasticsearch) -> bool:
+    return bool(getattr(es.transport, _LEGACY_ATTR, False))
+
+
+def _mark_legacy(es: Elasticsearch) -> None:
+    if not is_legacy(es):
+        setattr(es.transport, _LEGACY_ATTR, True)
+        log.info("cluster %s doesn't speak 8.x headers; using plain JSON",
+                 [getattr(n.config, "host", "?") for n in es.transport.node_pool.all()][:3])
+
+
+def _rejects_8x_headers(e: EsApiError) -> bool:
+    """A 400/406 that is about the Accept/Content-Type header itself (nothing ran)."""
+    if getattr(e.meta, "status", None) not in (400, 406):
+        return False
+    text = f"{e.body} {e.message}".lower()
+    return any(h in text for h in _MEDIA_TYPE_HINTS)
+
+
+def _plain(headers: dict) -> dict:
+    out = {}
+    for k, v in headers.items():
+        out[k] = ("application/x-ndjson" if "ndjson" in v else "application/json") \
+            if k.lower() in ("accept", "content-type") and "vnd.elasticsearch" in v else v
+    return out
+
+
+def _legacy_request(es: Elasticsearch, method: str, path: str, body: Any, params: dict | None,
+                    headers: dict) -> Any:
+    from elasticsearch._sync.client.utils import _quote_query
+    target = f"{path}?{_quote_query(params)}" if params else path
+    kw = {k: getattr(es, f"_{k}") for k in ("request_timeout", "max_retries", "retry_on_status",
+                                             "retry_on_timeout") if hasattr(es, f"_{k}")}
+    merged = dict(es._headers)  # client-level headers: Authorization, user-agent, opaque id
+    merged.update(headers)
+    meta, resp_body = es.transport.perform_request(method, target, headers=_plain(merged),
+                                                   body=body, **kw)
+    if not 200 <= meta.status < 300 and not (method == "HEAD" and meta.status == 404):
+        message = resp_body.get("error", str(resp_body)) if isinstance(resp_body, dict) else str(resp_body)
+        if isinstance(message, dict):
+            message = message.get("type", str(message))
+        raise HTTP_EXCEPTIONS.get(meta.status, EsApiError)(message=message, meta=meta, body=resp_body)
+    return resp_body
+
+
+def _request(es: Elasticsearch, method: str, path: str, body: Any, params: dict | None,
+             headers: dict) -> Any:
+    if is_legacy(es):
+        return _legacy_request(es, method, path, body, params, headers)
+    try:
+        return es.perform_request(method, path, headers=headers, body=body, params=params).body
+    except UnsupportedProductError as e:
+        # The request ran and succeeded (2xx); only the product header was missing.
+        _mark_legacy(es)
+        return e.body
+    except EsApiError as e:
+        if not _rejects_8x_headers(e):
+            raise
+        # Refused while reading the headers, so nothing ran: safe to send again.
+        _mark_legacy(es)
+        return _legacy_request(es, method, path, body, params, headers)
+
+
 def es_call(es: Elasticsearch, method: str, path: str, body: Any = None,
             params: dict | None = None, headers: dict | None = None) -> Any:
     """Raw ES request. Raises ApiError with a clean code on failure."""
     try:
-        resp = es.perform_request(method, path, headers=headers or ES_HEADERS, body=body, params=params)
-        return resp.body
+        return _request(es, method, path, body, params, headers or ES_HEADERS)
     except EsApiError as e:
         status = getattr(e.meta, "status", 500)
         reason = _es_reason(e.body) or str(e)

@@ -14,7 +14,7 @@ from app.main import create_app
 from app.settings import Settings
 from app.storage import S3Store
 
-from conftest import API_PASSWORD, API_USER, BUCKET, ES_URL, ROOT, as_user
+from conftest import API_PASSWORD, API_USER, BUCKET, ES_URL, ES_VERSION, ROOT, as_user
 
 NEW = {
     "id": "added", "name": "Added cluster", "description": "added in a test",
@@ -41,7 +41,7 @@ def test_add_use_update_remove(mapp, es, prefix):
     r = c.post("/api/v1/admin/clusters", json=NEW, headers=ROOT)
     assert r.status_code == 201, r.text
     body = r.json()
-    assert body["test"]["reachable"] and body["test"]["version"].startswith("8.")
+    assert body["test"]["reachable"] and body["test"]["version"] == ES_VERSION
     assert body["cluster"]["source"] == "managed" and body["cluster"]["editable"]
     assert body["cluster"]["hosts"] == [ES_URL]  # trailing slash trimmed
     assert "password" not in r.text and API_PASSWORD not in r.text

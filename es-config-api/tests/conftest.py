@@ -38,6 +38,8 @@ def _es_up() -> bool:
 
 if not _es_up():
     pytest.skip(f"Elasticsearch not reachable at {ES_URL}", allow_module_level=True)
+ES_VERSION = requests.get(ES_URL, auth=(ES_USER, ES_PASSWORD), timeout=3).json()["version"]["number"]
+ES_MAJOR_MINOR = tuple(int(x) for x in ES_VERSION.split(".")[:2])
 
 
 class Es:

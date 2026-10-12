@@ -117,8 +117,21 @@ def _nested_wrap(field: str, query: dict, nested_paths: Iterable[str]) -> dict:
     return query
 
 
-def _escape_wildcard(v: str) -> str:
-    return re.sub(r"([*?\\])", r"\\\1", v)
+def _ci_regexp(v: str) -> str:
+    """Case-insensitive Lucene regexp for a literal: "Sp-1" -> "[sS][pP]\\-1".
+    Works on every Elasticsearch version (wildcard's case_insensitive needs 7.10+)."""
+    if len(v) > 256:
+        raise bad_request("INVALID_FILTER", "A 'contains' value can be at most 256 characters")
+    out = []
+    for ch in v:
+        lo, up = ch.lower(), ch.upper()
+        if lo != up and len(lo) == len(up) == 1:
+            out.append(f"[{lo}{up}]")
+        elif ch.isalnum():
+            out.append(ch)
+        else:
+            out.append("\\" + ch)
+    return "".join(out)
 
 
 def _filter_clause(f: Filter, nested: Iterable[str]) -> tuple[str, dict]:
@@ -143,8 +156,7 @@ def _filter_clause(f: Filter, nested: Iterable[str]) -> tuple[str, dict]:
     else:  # contains
         if f.value in (None, ""):
             raise bad_request("INVALID_FILTER", f"Filter on '{fld}' needs a value")
-        q = {"wildcard": {fld: {"value": f"*{_escape_wildcard(str(f.value))}*",
-                                "case_insensitive": True}}}
+        q = {"regexp": {fld: {"value": f".*{_ci_regexp(str(f.value))}.*", "flags": "NONE"}}}
     q = _nested_wrap(fld, q, nested)
     negative = f.op in ("is_not", "not_one_of", "not_exists")
     return ("must_not" if negative else "filter"), q

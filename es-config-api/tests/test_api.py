@@ -3,7 +3,8 @@ from __future__ import annotations
 import time
 from datetime import datetime, timezone
 
-from conftest import ROOT, as_user
+import pytest
+from conftest import ES_MAJOR_MINOR, ES_VERSION, ROOT, as_user
 
 API = "/api/v1/clusters/test"
 REASON = {"reason": "test change"}
@@ -350,7 +351,7 @@ def test_pending_snapshot_recovery(client, env, es, prefix, open_allowlist):
 def test_admin_clusters_and_users(client):
     items = client.get("/api/v1/admin/clusters", headers=ROOT).json()["items"]
     assert {i["id"] for i in items} == {"test", "other"} and all(i["reachable"] for i in items)
-    assert items[0]["version"] == "8.17.1"
+    assert items[0]["version"] == ES_VERSION
     client.put("/api/v1/admin/users/carol", json={"clusters": {"*": "view"}}, headers=ROOT)
     assert len(client.get("/api/v1/clusters", headers=as_user("carol")).json()["items"]) == 2
     assert client.delete("/api/v1/admin/users/carol", headers=ROOT).status_code == 200
@@ -438,6 +439,7 @@ def test_allowlist_rejects_non_list_patterns(client):
         assert r.status_code == 400, bad
 
 
+@pytest.mark.skipif(ES_MAJOR_MINOR < (7, 11), reason="runtime fields need Elasticsearch 7.11+")
 def test_mapping_cannot_touch_runtime_or_null(client, es, prefix, open_allowlist):
     idx = f"{prefix}-rt"
     es("PUT", f"/{idx}", json={"settings": {"number_of_replicas": 0}, "mappings": {

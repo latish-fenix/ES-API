@@ -10,7 +10,7 @@ The project uses two main languages: **Python** for the API and **TypeScript** (
 | --- | --- | --- |
 | API (backend) | Python 3.12 | FastAPI |
 | Web console (frontend) | TypeScript 5 | React 18, built with Vite |
-| Data, secrets, email | (services) | Elasticsearch 8.17, AWS S3, AWS Secrets Manager, Amazon SES |
+| Data, secrets, email | (services) | Elasticsearch 8.17 (7.x also works), AWS S3, AWS Secrets Manager, Amazon SES |
 | Deployment | Dockerfile, YAML | Docker Compose on EC2 |
 
 Size (lines of code, generated files and docs not counted): 18,600 lines, 95% Python and TypeScript.
@@ -75,7 +75,7 @@ There is no database server, message queue or cache service.
 
 | Tool | Used for |
 | --- | --- |
-| **pytest** 8 | 86 tests in `tests/`, run against a real Elasticsearch 8.17 |
+| **pytest** 8 | 93 tests in `tests/`, run against a real Elasticsearch 8.17 (they also pass on 7.9.1) |
 | **moto** 5 | Simulates S3, Secrets Manager (both regions) and SES in the tests |
 | **httpx** / FastAPI `TestClient`, **requests** | Calling the API in tests and in `scripts/smoke_test.py` |
 | **TypeScript compiler** (`tsc -b`) | Type-checks the console on every build |

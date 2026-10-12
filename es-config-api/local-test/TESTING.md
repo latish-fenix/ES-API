@@ -186,7 +186,7 @@ With Elasticsearch running (step 1), from the `es-config-api` folder:
 .venv\Scripts\python -m pytest -q
 ```
 
-This runs 86 tests against your local Elasticsearch, with S3 simulated. With the API
+This runs 93 tests against your local Elasticsearch, with S3 simulated. With the API
 running (step 2), you can also run:
 
 ```cmd
