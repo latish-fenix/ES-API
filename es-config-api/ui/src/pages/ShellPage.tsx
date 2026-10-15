@@ -254,7 +254,7 @@ export function ShellPage() {
   const responseText = res?.kind === "read" ? (typeof res.response === "string" ? res.response : pretty(res.response)) : "";
 
   return (
-    <Page crumbs={useClusterCrumbs(clusterId, { label: "Shell" })} title="Shell" health={health?.status ?? null}>
+    <Page crumbs={useClusterCrumbs(clusterId, { label: "Shell" })} title="Shell" health={health?.status ?? null} refresh={false}>
       <div className="page-head" style={{ alignItems: "center" }}>
         <div className="stack-sm grow">
           <h1>Shell</h1>

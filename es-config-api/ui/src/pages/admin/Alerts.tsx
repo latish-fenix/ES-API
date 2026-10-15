@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useId, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   enc, get, request, type ActiveAlert, type AlertEvent, type AlertMetric, type AlertRun, type AlertSettings,
@@ -18,7 +18,7 @@ export const METRIC_LABEL: Record<AlertMetric, string> = {
 const METRIC_NOTE: Record<AlertMetric, string> = {
   disk: "Disk used on each data node",
   ram: "RAM Elasticsearch holds, without the OS file cache (estimate, within ~5% of CloudWatch)",
-  heap: "JVM heap used; alerts after 2 checks in a row above the line",
+  heap: "JVM heap used; read every 2 minutes, alerts when 3 of the last 5 readings are over the line (heap swings a lot with garbage collection)",
   cpu: "CPU; alerts after 2 checks in a row above the line",
   shards: "Shards in the cluster vs its limit (max_shards_per_node × data nodes); new indices fail past 100%",
   health: "Cluster yellow or red (unassigned shards): always critical",
@@ -331,7 +331,11 @@ function Thresholds({ settings }: { settings: AlertSettings }) {
   const clusters = useClusters().data ?? [];
   const [draft, setDraft] = useState<AlertSettings>(settings);
   const [scope, setScope] = useState("");          // "" = defaults
-  useEffect(() => setDraft(settings), [settings]);
+  const loaded = useRef(JSON.stringify(settings));
+  useEffect(() => {
+    setDraft((cur) => (JSON.stringify(cur) === loaded.current ? settings : cur));   // keep unsaved edits
+    loaded.current = JSON.stringify(settings);
+  }, [settings]);
   const dirty = useMemo(() => JSON.stringify(draft) !== JSON.stringify(settings), [draft, settings]);
   const save = useMutation({
     mutationFn: async () => (await request<AlertSettings>("/admin/alerts/settings", { method: "PUT", body: draft })).data,

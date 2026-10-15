@@ -376,7 +376,7 @@ until AWS grants production access).
 The console opens on a table of every cluster the user can access (admins: all): health,
 nodes, active alerts, disk / RAM / heap / CPU (worst node and average, coloured by the alert
 thresholds), shards against the limit, size and 7-day growth, and a 24-hour trend; below it a
-chart per metric over 24 hours or 7 days. The page re-reads each cluster every 2 minutes,
+chart per metric over 24 hours or 7 days. The page re-reads each cluster every 30 seconds,
 each on its own (`GET /clusters/{id}/summary`, 15-second timeout, no retries), so a slow cluster
 only delays its own row. Trend points come from the 5-minute alert check
 (`GET /clusters/{id}/trends`), which keeps reading clusters even when alerts are turned off
@@ -392,7 +392,7 @@ one Slack channel (incoming webhook, set in **Admin → Alerts**, stored in Secr
 | --- | --- | --- |
 | Disk | disk used on each data node | 70% / 80% |
 | RAM (excl. cache) | memory Elasticsearch holds (heap + non-heap + direct buffers) / node RAM | 70% / 80% |
-| JVM heap | heap used, above the line for 2 checks | 70% / 80% |
+| JVM heap | heap used, read every 2 minutes; 3 of the last 5 readings over the line | 70% / 80% |
 | CPU | CPU, above the line for 2 checks | 70% / 80% |
 | Shards | shards of open indices / (`cluster.max_shards_per_node` × data nodes) | 70% / 80% |
 | Cluster health | yellow or red (unassigned shards) | critical |
@@ -421,6 +421,11 @@ one Slack channel (incoming webhook, set in **Admin → Alerts**, stored in Secr
   lock (`locks/_alerts/...`) stops overlaps; the digest is claimed once per week in
   `alerts/digests/`. Calls to Elasticsearch during a check time out after 15 s. Nothing here
   changes a cluster.
+- JVM heap swings 20–30 points within seconds (garbage collection), so it isn't judged on one
+  reading: a light check reads every node's heap every 2 minutes (`alerts/heap.json`, the last
+  5 readings per node, one `_nodes/stats/jvm` call per cluster) and a heap alert needs 3 of the
+  last 5 over the line (critical: 3 at or above critical). It clears when fewer than 3 of 5
+  are within 2 points of the line. **Check now** adds a reading only if one is due.
 - Network: the server needs outbound HTTPS to `hooks.slack.com`.
 
 ## How a change runs
@@ -468,6 +473,7 @@ alerts/snoozes.json                          snoozes (who, until, reason)
 alerts/history/{date}.json                   alerts that started, changed or cleared that day
 alerts/sizes/{cluster}/{date}.json           index sizes once a day, for the weekly digest
 alerts/digests/{week}.json                   marks that week's digest as sent
+alerts/heap.json                             each node's last 5 heap readings (every 2 minutes), for heap alerts
 alerts/metrics/{cluster}/{date}.json         one sample per check (worst node: disk, RAM, heap, CPU, shards %), kept 8 days, for the dashboard
 locks/_alerts/run/check.lock                 held while one worker runs an alert check
 ```

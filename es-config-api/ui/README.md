@@ -209,11 +209,19 @@ call.
 ### Dashboard (`pages/Dashboard.tsx`)
 
 The home page (`/`). `useQueries` reads `GET /clusters/{id}/summary` and `…/trends?hours=24` per
-cluster (and `hours=168` only while **7 days** is picked), each refetched every 2 minutes, so rows
+cluster (and `hours=168` only while **7 days** is picked), each refetched every 30 seconds, so rows
 fill in independently. Sorting is client-side; the default key is an "attention" score
 (not answering, red, critical alerts, yellow, warnings). The trend chart is a hand-drawn SVG
 (`TrendChart`: crosshair + tooltip, dashed threshold lines when every cluster shares them, at most
 8 series in the `--series-1…8` colours, which have light and dark values in `styles.css`).
+
+### Refresh
+
+`Page` puts a **Refresh** button in the top bar (`RefreshButton` in `components/Shell.tsx`): it
+calls `queryClient.refetchQueries({ type: "active" })`, i.e. re-reads every query the page is
+showing. Pages without live data pass `refresh={false}` (Shell, Change password, Not found).
+Editors that load from the server (templates/ILM/pipelines, Allowlist, alert Thresholds) only
+replace their text with fresh data when it hasn't been edited, so a refresh never loses work.
 
 ### Alerts (`pages/admin/Alerts.tsx`)
 

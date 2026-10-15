@@ -96,9 +96,6 @@ export function Clusters() {
           <h1>Clusters</h1>
           <span className="sub">Elasticsearch clusters this console manages. Give people access to a new cluster on the Users page.</span>
         </div>
-        <button type="button" className="btn" onClick={() => q.refetch()} disabled={q.isFetching}>
-          <Icon name="refresh" /> {q.isFetching ? "Checking…" : "Check again"}
-        </button>
         <button type="button" className="btn btn-primary" onClick={() => setOpen({ mode: "add" })} disabled={!!managedOff}>
           <Icon name="plus" /> Add cluster
         </button>

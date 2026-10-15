@@ -1,4 +1,4 @@
-import { useQueries, useQueryClient } from "@tanstack/react-query";
+import { useQueries } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { enc, get, type Cluster, type ClusterSummary, type MetricRule, type ResourceStat, type TrendMetric, type Trends } from "../api";
@@ -7,7 +7,7 @@ import { Page } from "../components/Shell";
 import { Badge, ErrorCallout, HealthDot, Spinner, errorMessage } from "../components/ui";
 import { bytes, num, when } from "../format";
 
-const REFRESH_MS = 120_000;
+const REFRESH_MS = 30_000;   // the page; alerts are judged separately on the server (heap: 2-minute readings)
 const METRIC_LABEL: Record<TrendMetric, string> = { disk: "Disk", ram: "RAM (excl. cache)", heap: "JVM heap", cpu: "CPU" };
 const MAX_SERIES = 8;
 
@@ -213,7 +213,6 @@ function SummaryCells({ s, failed, err }: { s?: ClusterSummary; failed: boolean;
 
 export function Dashboard({ clusters }: { clusters: Cluster[] }) {
   const navigate = useNavigate();
-  const qc = useQueryClient();
   const [sort, setSort] = useState<{ key: SortKey; desc: boolean }>({ key: "attention", desc: true });
   const [metric, setMetric] = useState<TrendMetric>("disk");
   const [hours, setHours] = useState(24);
@@ -245,7 +244,6 @@ export function Dashboard({ clusters }: { clusters: Cluster[] }) {
   });
   const updatedAt = Math.max(0, ...summaries.map((q) => q.dataUpdatedAt || 0));
   const fetching = summaries.some((q) => q.isFetching);
-  const refresh = () => ["summary", "trends"].forEach((k) => qc.invalidateQueries({ queryKey: [k] }));
 
   const rows = clusters.map((c, i) => ({ c, s: summaries[i].data, failed: summaries[i].isError && !summaries[i].data, err: summaries[i].error, t: trends24[i].data }));
   const sorted = [...rows].sort((a, b) => {
@@ -288,10 +286,9 @@ export function Dashboard({ clusters }: { clusters: Cluster[] }) {
             {` · ${counts.crit} critical and ${counts.warn} warning alert${counts.warn === 1 ? "" : "s"}`}
           </span>
           <span className="hint" role="status">
-            <Icon name="clock" size={12} /> This page refreshes every 2 minutes{updatedAt ? ` · last refreshed ${when(new Date(updatedAt).toISOString(), false)} UTC` : ""}{fetching ? " · refreshing…" : ""}
+            <Icon name="clock" size={12} /> This page refreshes every 30 seconds (or use Refresh at the top){updatedAt ? ` · last refreshed ${when(new Date(updatedAt).toISOString(), false)} UTC` : ""}{fetching ? " · refreshing…" : ""}
           </span>
         </div>
-        <button type="button" className="btn" onClick={refresh} disabled={fetching}><Icon name="refresh" /> {fetching ? "Refreshing…" : "Refresh now"}</button>
       </div>
 
       <div className="dash-controls">

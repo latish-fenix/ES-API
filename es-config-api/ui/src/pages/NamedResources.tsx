@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { ApiError, enc, get, type ConfigDoc, type NamedType } from "../api";
 import { ChangeFlow, RollbackDialog, SnapshotDialog, StatusBadges } from "../components/ChangeFlow";
@@ -85,7 +85,14 @@ function Resource({ type, name, clusterId, canEdit, admin }: { type: NamedType; 
   const original = doc.data ? pretty(doc.data.config) : "";
   const [text, setText] = useState("");
   const [dialog, setDialog] = useState<"rollback" | "snapshot" | null>(null);
-  useEffect(() => { if (doc.data) setText(pretty(doc.data.config)); }, [doc.data]);
+  const loaded = useRef<string | null>(null);
+  useEffect(() => {
+    if (!doc.data) return;
+    const next = pretty(doc.data.config);
+    // fresh data (a refresh, or after a change) replaces the text only if it hasn't been edited
+    setText((cur) => (loaded.current === null || cur === loaded.current ? next : cur));
+    loaded.current = next;
+  }, [doc.data]);
   const refresh = () => {
     qc.invalidateQueries({ queryKey: ["config", path] });
     qc.invalidateQueries({ queryKey: ["previous", path] });

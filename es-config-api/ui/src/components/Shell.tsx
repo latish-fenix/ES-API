@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useIsFetching, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createContext, Fragment, useContext, useEffect, useId, useState, type ReactNode } from "react";
 import { Link, NavLink, Outlet, useLocation, useNavigate, useParams } from "react-router-dom";
 import { NAMED_TYPES, get, request, setApprovalHandler, type AlertsOverview } from "../api";
@@ -177,12 +177,28 @@ export interface Crumb {
   to?: string;
 }
 
-export function Page({ crumbs, title, health, actions, children }: {
+/** Re-reads everything on the current page (every active query). */
+export function RefreshButton() {
+  const qc = useQueryClient();
+  const fetching = useIsFetching() > 0;
+  const [at, setAt] = useState<Date | null>(null);
+  return (
+    <button type="button" className="btn btn-sm refresh-btn" disabled={fetching} aria-label="Refresh this page"
+      title={at ? `Re-read everything on this page · last refreshed by hand ${at.toISOString().slice(11, 19)} UTC` : "Re-read everything on this page"}
+      onClick={async () => { await qc.refetchQueries({ type: "active" }); setAt(new Date()); }}>
+      <Icon name="refresh" size={14} className={fetching ? "spin" : undefined} /> <span className="refresh-label">{fetching ? "Refreshing…" : "Refresh"}</span>
+    </button>
+  );
+}
+
+export function Page({ crumbs, title, health, actions, children, refresh = true }: {
   crumbs: Crumb[];
   title: string;
   health?: string | null;
   actions?: ReactNode;
   children: ReactNode;
+  /** Show the Refresh button (pages without live data turn it off). */
+  refresh?: boolean;
 }) {
   usePageTitle(title);
   const toggleNav = useContext(NavCtx);
@@ -202,6 +218,7 @@ export function Page({ crumbs, title, health, actions, children }: {
         </nav>
         {health !== undefined && <HealthPill status={health} />}
         {actions}
+        {refresh && <RefreshButton />}
       </header>
       <main className="page" id="main">
         <div className="page-inner">{children}</div>

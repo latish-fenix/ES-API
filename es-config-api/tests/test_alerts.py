@@ -115,11 +115,17 @@ def test_fire_repeat_resolve(env, client, slack):
     assert events.count("FIRING") == 4 and events.count("RESOLVED") == 4
 
 
-def test_heap_needs_two_checks_and_snooze(env, client, slack):
+def test_heap_three_of_five_and_snooze(env, client, slack):
     svc: AlertService = env["app"].state.alerts
     _settings(client, **_quiet(heap={"warn": 1, "crit": 2}))
-    assert svc.run_once(T0)["messages"] == 0                  # first reading above the line: wait
-    assert svc.run_once(T0 + timedelta(minutes=5))["messages"] == 2
+    svc.sample_heap(T0)
+    svc.sample_heap(T0 + timedelta(minutes=2))
+    assert svc.run_once(T0 + timedelta(minutes=2))["messages"] == 0      # 2 readings over the line: not yet
+    assert svc.sample_heap(T0 + timedelta(minutes=3), only_if_due=True) is None   # less than 2 min later: skipped
+    svc.sample_heap(T0 + timedelta(minutes=4))
+    assert svc.run_once(T0 + timedelta(minutes=5))["messages"] == 2      # 3 of the last 5: critical on both
+    a = next(a for a in client.get(A, headers=ROOT).json()["active"] if a["metric"] == "heap")
+    assert a["severity"] == "critical" and "3 of the last 3 readings (every 2 min) at or above 2%" in a["detail"]
     # snooze everything on 'test' for 1 hour: 'other' still posts, 'test' doesn't, Slack hears nothing about it
     r = client.post(f"{A}/snoozes", json={"clusterId": "test", "duration": "1h", "reason": "resizing heap"},
                     headers=ROOT)
@@ -354,21 +360,32 @@ def test_review_regressions(env, client, slack):
     svc.run_once(T0 + timedelta(minutes=41))
     assert any("*Warning*" in t and "Disk on n1: 75%" in t for t in _texts(slack))
 
-    # heap: two readings seconds apart are not "2 checks"
+    # heap: 3 of the last 5 two-minute readings over the line
     _settings(client, **_quiet(heap={"warn": 50, "crit": 90}))
-    fake.heap = 60.0
-    svc.run_once(T0 + timedelta(minutes=50))
-    svc.run_once(T0 + timedelta(minutes=50, seconds=20))
-    assert not [a for a in client.get(A, headers=ROOT).json()["active"] if a["metric"] == "heap" and a["clusterId"] == "test"]
-    svc.run_once(T0 + timedelta(minutes=55))
-    assert [a for a in client.get(A, headers=ROOT).json()["active"] if a["metric"] == "heap" and a["clusterId"] == "test"]
+    reads = iter([60.0, 40.0, 60.0, 40.0, 60.0, 60.0, 30.0, 30.0, 30.0])
+    svc._read_heap = lambda cid: {"n1": next(reads)} if cid == "test" else {}
+    heap = lambda: [a for a in client.get(A, headers=ROOT).json()["active"] if a["metric"] == "heap" and a["clusterId"] == "test"]  # noqa: E731
+    base = T0 + timedelta(minutes=50)
+    for i in range(4):                                   # 60, 40, 60, 40: only 2 over the line
+        svc.sample_heap(base + timedelta(minutes=2 * i))
+    svc.run_once(base + timedelta(minutes=6))
+    assert not heap()
+    svc.sample_heap(base + timedelta(minutes=8))         # 60, 40, 60, 40, 60: 3 of 5
+    svc.run_once(base + timedelta(minutes=8))
+    assert [a["severity"] for a in heap()] == ["warning"]
+    assert client.post(f"{A}/snoozes", json={"clusterId": "test", "metric": "heap", "duration": "resolved",
+                                             "reason": "x"}, headers=ROOT).status_code == 201
+    for i in range(4):                                   # 60, 30, 30, 30: back under
+        svc.sample_heap(base + timedelta(minutes=10 + 2 * i))
+    svc.run_once(base + timedelta(minutes=16))
+    assert not heap()
 
     # 'until it clears' needs something active to wait for
     r = client.post(f"{A}/snoozes", json={"clusterId": "test", "metric": "disk", "duration": "resolved", "reason": "x"},
                     headers=ROOT)
     assert r.status_code == 400 and r.json()["error"]["code"] == "NOTHING_TO_SNOOZE"
-    assert client.post(f"{A}/snoozes", json={"clusterId": "test", "metric": "heap", "duration": "resolved",
-                                             "reason": "x"}, headers=ROOT).status_code == 201
+    # the 'until it clears' heap snooze ended when the heap alert cleared
+    assert not [x for x in client.get(A, headers=ROOT).json()["snoozes"] if x["metric"] == "heap"]
 
 
 def test_digest_once_and_counts(env, client, slack):

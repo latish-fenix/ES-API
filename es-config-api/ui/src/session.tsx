@@ -32,7 +32,7 @@ export function useHealth(clusterId: string | undefined) {
     queryKey: ["health", clusterId],
     queryFn: () => get<Health>(`/clusters/${encodeURIComponent(clusterId!)}/health`),
     enabled: !!clusterId,
-    refetchInterval: 60_000,
+    refetchInterval: 30_000,
     retry: 1,
   });
 }

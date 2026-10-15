@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useId, useState, type KeyboardEvent } from "react";
+import { useEffect, useId, useRef, useState, type KeyboardEvent } from "react";
 import { enc, get, request, type Rule, type Rules } from "../../api";
 import { Icon } from "../../components/icons";
 import { JsonEditor, parseJson } from "../../components/JsonEditor";
@@ -120,7 +120,13 @@ export function Allowlist() {
   const [draft, setDraft] = useState<Rules>({});
   const [json, setJson] = useState<string | null>(null);
   const [jsonErr, setJsonErr] = useState<string | null>(null);
-  useEffect(() => { if (q.data) setDraft(normalize(q.data.rules)); }, [q.data]);
+  const loaded = useRef<string | null>(null);
+  useEffect(() => {
+    if (!q.data) return;
+    const next = normalize(q.data.rules);
+    setDraft((cur) => (loaded.current === null || JSON.stringify(normalize(cur)) === loaded.current ? next : cur));
+    loaded.current = JSON.stringify(next);
+  }, [q.data]);
 
   const usesGlobal = !isGlobal && q.data?.source === "global";
   const dirty = !!q.data && !usesGlobal && JSON.stringify(normalize(q.data.rules)) !== JSON.stringify(normalize(draft));

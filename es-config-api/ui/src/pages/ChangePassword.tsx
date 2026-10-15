@@ -48,7 +48,7 @@ export function ChangePassword() {
   };
 
   return (
-    <Page crumbs={[{ label: "Account" }, { label: "Change password" }]} title="Change password">
+    <Page crumbs={[{ label: "Account" }, { label: "Change password" }]} title="Change password" refresh={false}>
       <div className="stack-sm">
         <h1>Change password</h1>
         <span className="sub">{me.username}</span>

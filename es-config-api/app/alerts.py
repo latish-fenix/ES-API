@@ -4,7 +4,8 @@ Every ALERT_INTERVAL_SECONDS (default 300) one API worker checks each cluster:
 
   disk    each data node's disk used                       warning 70% · critical 80%
   ram     RAM used excluding cache (see nodes.py)          70 / 80
-  heap    JVM heap used, above the line 2 checks running   70 / 80
+  heap    JVM heap: 3 of the last 5 two-minute readings    70 / 80
+          over the line (a light heap read every 2 minutes)
   cpu     CPU, above the line 2 checks running             70 / 80
   shards  shards in the cluster vs its limit                70 / 80
           (cluster.max_shards_per_node × data nodes)
@@ -58,7 +59,13 @@ RUN_LOCK = ("_alerts", "run", "check")
 PERCENT_METRICS = ("disk", "ram", "heap", "cpu", "shards")
 STATE_METRICS = ("health", "nodes")
 METRICS = PERCENT_METRICS + STATE_METRICS
-SUSTAINED = {"heap", "cpu"}                   # must stay above the line for 2 checks (one interval)
+SUSTAINED = {"cpu"}                           # must stay above the line for 2 checks (one interval)
+# JVM heap swings 20-30 points within seconds (garbage collection), so it is judged on a window:
+# a light check reads heap every 2 minutes, and an alert needs 3 of the last 5 readings over the line.
+HEAP_KEY = "alerts/heap.json"
+HEAP_LOCK = ("_alerts", "run", "heap")
+HEAP_EVERY = 120
+HEAP_WINDOW, HEAP_NEED = 5, 3
 COLLECT_TIMEOUT = 15                          # seconds per Elasticsearch call during a check
 HYSTERESIS = 2.0                              # clears this many points below the line
 METRIC_LABEL = {"disk": "Disk", "ram": "RAM (excl. cache)", "heap": "JVM heap", "cpu": "CPU",
@@ -206,6 +213,9 @@ class AlertService:
         self.slack = slack
         self.interval = max(60, int(interval_seconds))
         self.locks = LockRepo(store, 900)        # longer than the slowest possible check
+        self.heap_locks = LockRepo(store, 100)
+        self._heap: dict = {}
+        self._now: datetime | None = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self.worker_id = f"{os.uname().nodename if hasattr(os, 'uname') else 'host'}:{os.getpid()}:{uuid.uuid4().hex[:6]}"
@@ -374,12 +384,19 @@ class AlertService:
         ns = data["nodes"]
         for n in ns["nodes"]:
             for metric, field_, data_only in (("disk", "diskUsedPercent", True), ("ram", "ramUsedPercent", False),
-                                              ("heap", "heapUsedPercent", False), ("cpu", "cpuPercent", False)):
+                                              ("cpu", "cpuPercent", False)):
                 if data_only and not n.get("data"):
                     continue
                 v = n.get(field_)
                 if v is not None and effective(settings, cluster_id, metric).get("on"):
                     rows.append({"metric": metric, "node": n["name"], "value": float(v)})
+        if effective(settings, cluster_id, "heap").get("on"):
+            names = {n["name"] for n in ns["nodes"]}
+            fresh = (self._now or utcnow()) - timedelta(seconds=HEAP_EVERY * HEAP_WINDOW + 60)
+            for node, rs in sorted((self._heap.get(cluster_id) or {}).items()):
+                window = [r["v"] for r in rs if _parse(r["t"]) >= fresh][-HEAP_WINDOW:]
+                if window and node in names:
+                    rows.append({"metric": "heap", "node": node, "value": window[-1], "window": window})
         if data["shardLimit"] and effective(settings, cluster_id, "shards").get("on"):
             rows.append({"metric": "shards", "node": None,
                          "value": round(100 * data["shards"] / data["shardLimit"], 1),
@@ -420,6 +437,8 @@ class AlertService:
             return None
         for k in ("alerts", "pending", "nodes", "unannounced"):
             st.setdefault(k, {})
+        hdoc, _ = self.store.get_json(HEAP_KEY)
+        self._heap, self._now = (hdoc or {}).get("clusters") or {}, now
         snoozes = self.snoozes(now)
         clusters = sorted(self.app.state.registry.ids())
         run: dict = {"at": iso(now), "worker": self.worker_id, "clusters": {}, "slack": None}
@@ -563,6 +582,14 @@ class AlertService:
                 key = alert_key(cid, r["metric"], r["node"])
                 eff = effective(settings, cid, r["metric"])
                 prev = alerts.get(key)
+                if r["metric"] == "heap":
+                    sev, detail = self._heap_severity(r.pop("window"), eff, prev)
+                    if sev:
+                        conds[key] = {**r, "severity": sev, "detail": detail,
+                                      "threshold": eff["crit" if sev == "critical" else "warn"]}
+                    else:
+                        recovered.add(key)
+                    continue
                 sev = self._severity(r["value"], eff, prev)
                 if sev and r["metric"] in SUSTAINED and not prev:
                     over.add(key)
@@ -648,6 +675,20 @@ class AlertService:
         if value >= warn:
             return "warning"
         return None
+
+    @staticmethod
+    def _heap_severity(window: list[float], eff: dict, prev: dict | None) -> tuple[str | None, str | None]:
+        """3 of the last 5 two-minute readings over the line (2 points lower to stay on)."""
+        warn, crit = float(eff["warn"]), float(eff["crit"])
+        cl = crit - (HYSTERESIS if prev and prev["severity"] == "critical" else 0)
+        wl = warn - (HYSTERESIS if prev else 0)
+        nc = sum(1 for v in window if v >= cl)
+        nw = sum(1 for v in window if v >= wl)
+        if nc >= HEAP_NEED:
+            return "critical", f"{nc} of the last {len(window)} readings (every 2 min) at or above {crit:g}%"
+        if nw >= HEAP_NEED:
+            return "warning", f"{nw} of the last {len(window)} readings (every 2 min) at or above {warn:g}%"
+        return None, None
 
     @staticmethod
     def _repeat_due(prev: dict, settings: dict, now: datetime, severity: str) -> bool:
@@ -960,16 +1001,75 @@ class AlertService:
                             "text": "Weekly digest" + ("" if res.get("ok") else f" not sent: {res.get('error')}")}])
         return {**res, "digest": d}
 
+    # ---- JVM heap, every 2 minutes
+    def heap_due(self, now: datetime | None = None, doc: dict | None = None) -> bool:
+        now = now or utcnow()
+        if doc is None:
+            doc, _ = self.store.get_json(HEAP_KEY)
+        last = (doc or {}).get("at")
+        return not last or (now - _parse(last)).total_seconds() >= HEAP_EVERY - 10
+
+    def _read_heap(self, cid: str) -> dict[str, float]:
+        r = es_call(self._client(cid), "GET", "/_nodes/stats/jvm",
+                    params={"filter_path": "nodes.*.name,nodes.*.jvm.mem.heap_used_percent"})
+        out = {}
+        for n in (r.get("nodes") or {}).values():
+            v = ((n.get("jvm") or {}).get("mem") or {}).get("heap_used_percent")
+            if n.get("name") and v is not None:
+                out[n["name"]] = float(v)
+        return out
+
+    def _read_heap_safe(self, cid: str) -> dict[str, float] | None:
+        try:
+            return self._read_heap(cid)
+        except Exception as e:
+            log.info("heap read of %s failed: %s", cid, getattr(e, "message", e))
+            return None
+
+    def sample_heap(self, now: datetime | None = None, only_if_due: bool = False) -> dict | None:
+        """Read every cluster's heap per node and keep each node's last 5 readings."""
+        now = now or utcnow()
+        try:
+            token = self.heap_locks.acquire(*HEAP_LOCK, f"heap {self.worker_id}")
+        except ApiError as e:
+            if e.code == "CHANGE_IN_PROGRESS":
+                return None
+            raise
+        try:
+            doc, _ = self.store.get_json(HEAP_KEY)
+            doc = doc or {}
+            if only_if_due and not self.heap_due(now, doc):
+                return None
+            clusters = sorted(self.app.state.registry.ids())
+            with ThreadPoolExecutor(min(8, max(1, len(clusters)))) as pool:
+                results = dict(zip(clusters, pool.map(self._read_heap_safe, clusters)))
+            cutoff = now - timedelta(seconds=HEAP_EVERY * HEAP_WINDOW + 60)
+            out: dict = {}
+            for cid in clusters:
+                nodes = {n: [r for r in rs if _parse(r["t"]) >= cutoff]
+                         for n, rs in ((doc.get("clusters") or {}).get(cid) or {}).items()}
+                for n, v in (results[cid] or {}).items():
+                    nodes[n] = (nodes.get(n, []) + [{"t": iso(now), "v": v}])[-HEAP_WINDOW:]
+                nodes = {n: rs for n, rs in nodes.items() if rs}
+                if nodes:
+                    out[cid] = nodes
+            doc = {"at": iso(now), "clusters": out}
+            self.store.put_json(HEAP_KEY, doc)
+            return doc
+        finally:
+            self.heap_locks.release(*HEAP_LOCK, token)
+
     # ---- background loop
     def tick(self) -> None:
-        try:
-            if self.due():
-                self.run_once(only_if_due=True)
-        except ApiError as e:
-            if e.code != "CHECK_IN_PROGRESS":
-                log.warning("alert check: %s", e.message)
-        except Exception:
-            log.exception("alert check failed")
+        for name, step in (("heap check", lambda: self.heap_due() and self.sample_heap(only_if_due=True)),
+                           ("alert check", lambda: self.due() and self.run_once(only_if_due=True))):
+            try:
+                step()
+            except ApiError as e:
+                if e.code != "CHECK_IN_PROGRESS":
+                    log.warning("%s: %s", name, e.message)
+            except Exception:
+                log.exception("%s failed", name)
 
     def start(self) -> None:
         if self._thread:

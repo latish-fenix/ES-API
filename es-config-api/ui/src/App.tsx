@@ -27,7 +27,7 @@ function Home() {
   const items = clusters.data ?? [];
   if (items.length) return <Dashboard clusters={items} />;
   return (
-    <Page crumbs={[{ label: "Home" }]} title="No clusters">
+    <Page crumbs={[{ label: "Home" }]} title="No clusters" refresh={false}>
       <section className="card">
         <Empty title="You don't have access to any cluster yet">
           {me.admin ? <><Link to="/admin/clusters">Add a cluster</Link> in Administration, or list it in <code>config/clusters.yaml</code> on the server.</> : "Ask an admin to give you access."}
@@ -39,7 +39,7 @@ function Home() {
 
 function NotFound() {
   return (
-    <Page crumbs={[{ label: "Not found" }]} title="Not found">
+    <Page crumbs={[{ label: "Not found" }]} title="Not found" refresh={false}>
       <section className="card">
         <Empty title="This page doesn't exist"><Link to="/">Go to the overview</Link></Empty>
       </section>

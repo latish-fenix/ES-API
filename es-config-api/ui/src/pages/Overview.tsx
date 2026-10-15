@@ -13,7 +13,7 @@ function useClusterAlerts(clusterId: string) {
   return useQuery({
     queryKey: ["cluster-alerts", clusterId],
     queryFn: () => get<ClusterAlerts>(`/clusters/${enc(clusterId)}/alerts`),
-    refetchInterval: 60_000,
+    refetchInterval: 30_000,
   });
 }
 
@@ -172,7 +172,7 @@ export function Overview() {
 
   if (!hasAccess) {
     return (
-      <Page crumbs={[{ label: clusterId }]} title={clusterId}>
+      <Page crumbs={[{ label: clusterId }]} title={clusterId} refresh={false}>
         <ErrorCallout error={new Error(`You don't have access to cluster '${clusterId}'.`)} />
       </Page>
     );

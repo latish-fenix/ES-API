@@ -49,7 +49,7 @@ The console runs over plain HTTP on the internal network for now, so only sign i
 
 ## Dashboard: all clusters at a glance
 
-After you sign in you land on the **Dashboard** (**All clusters** at the top of the sidebar). It has one row for every cluster you have access to; admins see all of them. **The page refreshes every 2 minutes** (the time of the last refresh is under the title); **Refresh now** reads every cluster at once.
+After you sign in you land on the **Dashboard** (**All clusters** at the top of the sidebar). It has one row for every cluster you have access to; admins see all of them. **The page refreshes every 30 seconds** (the time of the last refresh is under the title); **Refresh** at the top reads every cluster at once.
 
 ![Dashboard](images/55-dashboard.png)
 
@@ -77,7 +77,7 @@ Apart from the Dashboard, everything happens on one cluster at a time: pick it i
 - **Sidebar, Configure:** Overview, Indices, Data, Index templates, Component templates, ILM policies, Ingest pipelines (the last four only if you have access to the whole cluster)
 - **Sidebar, Changes:** **Requests** (changes waiting for approval; the number shows how many need you) and **Shell** (Elasticsearch requests)
 - **Sidebar, Administration** (admins only): Cluster settings, Clusters, Users, Allowlist, Audit log
-- **Top bar:** where you are (click a part to go back) and the cluster's health (green, yellow or red), refreshed every minute
+- **Top bar:** where you are (click a part to go back), the cluster's health (green, yellow or red), and **Refresh**, which re-reads everything on the page at once. Pages also refresh on their own: the Dashboard, the Overview's nodes, alerts and health every 30 seconds. An unsaved edit in an editor is kept when the page refreshes
 - **Overview:** health, number of indices and documents (system indices hidden), your access, the **Nodes** table, and links to each area. Admins also see what the allowlist allows on this cluster and today's activity
 - **Switching clusters** keeps you on the same kind of page (for example Indices on the other cluster)
 
@@ -485,7 +485,7 @@ The **Added** column shows where each cluster comes from:
 | **In console** (with who added it, and when) | Added on this page. Saved on the API server in `data/clusters.managed.yaml`, **not in S3** | **Edit**, test, remove |
 | **clusters.yaml** | The server's `config/clusters.yaml` file | **Details** only; change it in the file on the server |
 
-**Check again** pings every cluster. A cluster that can't be reached shows the reason (for example a wrong password or a blocked port) in the Status column.
+**Refresh** (top right) pings every cluster again. A cluster that can't be reached shows the reason (for example a wrong password or a blocked port) in the Status column.
 
 ### Add a cluster
 
@@ -620,7 +620,7 @@ Alerts, approval requests and the weekly digest all go to that one channel. Unti
 | --- | --- | --- |
 | Disk | Disk used on a data node | 70% / 80% |
 | RAM (excl. cache) | Memory Elasticsearch holds on a node (see *About RAM* above) | 70% / 80% |
-| JVM heap | Heap used, above the line for 2 checks in a row | 70% / 80% |
+| JVM heap | Heap read every 2 minutes; alerts when 3 of the last 5 readings are over the line (heap swings a lot, so one reading isn't enough) | 70% / 80% |
 | CPU | CPU, above the line for 2 checks in a row | 70% / 80% |
 | Shards | Shards in the cluster against its limit (new indices fail at 100%) | 70% / 80% |
 | Cluster health | Yellow or red (unassigned shards) | always critical |

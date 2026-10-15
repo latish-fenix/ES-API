@@ -106,6 +106,7 @@ def history(request: Request, days: int = Query(7, ge=1, le=31), clusterId: str 
 
 @router.post(f"{ADMIN}/_check", summary="Check every cluster now (posts to Slack like the 5-minute check)")
 def check_now(request: Request, admin: User = Depends(require_admin)):
+    _svc(request).sample_heap(only_if_due=True)   # a heap reading if one is due (never more than every 2 min)
     return _svc(request).run_once()
 
 
