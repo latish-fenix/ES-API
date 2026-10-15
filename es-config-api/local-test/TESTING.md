@@ -70,6 +70,11 @@ the raw API at **http://localhost:8080/docs** (click an endpoint, **Try it out**
 | 32 | **Shell** (as alice) | Path `products-demo/_search`, body `{"size": 0, "aggs": {"by_brand": {"terms": {"field": "brand"}}}}`, **Run**; type `"` in the body to see field suggestions; **Copy as curl** | The aggregation result on the right, status 200; field names suggested; a curl command copied. **History** lists the request |
 | 33 | **Shell** (as the user from step 23) | `GET */_count` | Refused: "needs 'view' access on N of the indices matching '*'" |
 | 34 | **Shell** (as the admin) | `PUT products-demo/_settings` with `{"index": {"refresh_interval": "5s"}}`, **Run**, reason, **Apply change**; then `POST products-demo/_update_by_query` with `{"query": {"match_all": {}}, "set": {"checked": true}}`, **Run**, reason, type the count, **Apply change** | Each shows a dry run first; after applying, the audit log has the change (it can be rolled back there) and the bulk change is under **Data → Bulk changes** |
+| 35 | **Alerts** (admin) | Get a webhook for a test Slack channel (Slack → Apps → Incoming Webhooks), **Set webhook**, paste it, **Save**, **Send test message** | "Connected"; the test message is in the channel |
+| 36 | same | Under **Thresholds**, set Disk to warning `1` / critical `2`, **Save**, then **Check now** | A critical *Disk* alert per data node in **Active alerts**; the channel gets "Critical · local" with the disk value; the Overview shows a red alert box |
+| 37 | same | **Snooze** the disk alert for 1 hour with a reason; **Check now** again 5+ minutes later | The row says "Snoozed by …"; nothing new in Slack, and nothing about the snooze. The audit log has *Alert snoozed* |
+| 38 | same | Put Disk back to 70 / 80, **Save**, **End snooze**, **Check now** | The alert disappears; the channel gets "OK again · local" |
+| 39 | same | **Weekly digest → Preview**, then **Send now** | The preview lists size, shards, largest indices and request counts; the same summary arrives in Slack |
 
 Steps 18–22 need the `es_console_api` account to have the `read` and `write` privileges. If you set up
 Elasticsearch before the data browser existed, run `1-start-elasticsearch.cmd` again (it's safe
@@ -186,7 +191,7 @@ With Elasticsearch running (step 1), from the `es-config-api` folder:
 .venv\Scripts\python -m pytest -q
 ```
 
-This runs 93 tests against your local Elasticsearch, with S3 simulated. With the API
+This runs 105 tests against your local Elasticsearch, with S3 simulated. With the API
 running (step 2), you can also run:
 
 ```cmd

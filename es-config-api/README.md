@@ -303,7 +303,7 @@ Admin API (admins only): `GET /admin/clusters` (all clusters, pinged), `GET /adm
 
 | Status | Code examples |
 | --- | --- |
-| 400 | `INVALID_REQUEST`, `INVALID_CONFIG`, `REASON_REQUIRED`, `ES_REJECTED`, `CONFIRMATION_MISMATCH`, `INVALID_EMAIL`, `WEAK_PASSWORD`, `CANNOT_DELETE_SELF`, `INVALID_CLUSTER`, `INVALID_PERMISSIONS`, `INVALID_FILTER`, `RESULT_WINDOW_EXCEEDED`, `INVALID_FIELD`, `NOTHING_TO_CHANGE`, `DRY_RUN_REQUIRED`, `DRY_RUN_EXPIRED`, `DRY_RUN_MISMATCH`, `COUNT_MISMATCH` |
+| 400 | `INVALID_REQUEST`, `INVALID_CONFIG`, `REASON_REQUIRED`, `ES_REJECTED`, `CONFIRMATION_MISMATCH`, `INVALID_EMAIL`, `WEAK_PASSWORD`, `CANNOT_DELETE_SELF`, `INVALID_CLUSTER`, `INVALID_PERMISSIONS`, `INVALID_FILTER`, `RESULT_WINDOW_EXCEEDED`, `INVALID_FIELD`, `NOTHING_TO_CHANGE`, `DRY_RUN_REQUIRED`, `DRY_RUN_EXPIRED`, `DRY_RUN_MISMATCH`, `COUNT_MISMATCH`, `INVALID_WEBHOOK`, `INVALID_ALERT_SETTINGS`, `INVALID_SNOOZE`, `NOTHING_TO_SNOOZE` |
 | 401 | `NOT_AUTHENTICATED`, `SESSION_EXPIRED`, `INVALID_CREDENTIALS` |
 | 202 | not an error: `pendingApproval` (the change waits for an admin) |
 | 403 | `PERMISSION_DENIED`, `NOT_ALLOWLISTED`, `ADMIN_REQUIRED`, `CSRF_CHECK_FAILED`, `SYSTEM_INDEX` (data browser), `SELF_APPROVAL`, `SCRIPT_NOT_ALLOWED` / `NOT_ALLOWED_IN_SHELL` (shell) |
@@ -371,6 +371,47 @@ until AWS grants production access).
   aggregation names, never values or results. Each user's last 50 requests are kept in
   `shell-history/` for them only.
 
+## Alerts (Slack) and the weekly digest
+
+Every `ALERT_INTERVAL_SECONDS` (default 300) the API checks every cluster and posts problems to
+one Slack channel (incoming webhook, set in **Admin → Alerts**, stored in Secrets Manager as
+`<prefix>slack`; never in `.env`, S3 or the audit log):
+
+| Alert | Measured as | Warning / critical (defaults) |
+| --- | --- | --- |
+| Disk | disk used on each data node | 70% / 80% |
+| RAM (excl. cache) | memory Elasticsearch holds (heap + non-heap + direct buffers) / node RAM | 70% / 80% |
+| JVM heap | heap used, above the line for 2 checks | 70% / 80% |
+| CPU | CPU, above the line for 2 checks | 70% / 80% |
+| Shards | shards of open indices / (`cluster.max_shards_per_node` × data nodes) | 70% / 80% |
+| Cluster health | yellow or red (unassigned shards) | critical |
+| Nodes | a node left the cluster, or the cluster stopped answering | critical |
+
+- An alert posts when it starts, then every hour while it is a warning and every 5 minutes while
+  it is critical (both editable), when its level changes, and once as "OK again" when it clears.
+  It clears 2 points below the line it fired at. Thresholds can be overridden per cluster, and
+  each alert type (or a whole cluster) can be turned off.
+- **Snoozes** are set in the console only (one alert, one type on a cluster, or a whole cluster;
+  1 h, 4 h, 24 h, 7 days or until it clears, with a reason). Nothing about snoozes is posted to
+  Slack; snoozed alerts are still listed. Snoozing is audited.
+- A node that leaves is remembered until it comes back or an admin clicks **Forget node**; its
+  own disk/RAM/heap/CPU alerts are dropped without an "OK again".
+- Approval requests are posted too: new, approved, rejected, failed or outdated, expired. Like the
+  emails they carry who, what, where, the reason and the comment, never values.
+- **Weekly digest, Fridays 15:00 IST:** per cluster size, documents and indices with growth over
+  the week, shards vs the limit, disk, health, the 10 largest and 10 fastest-growing indices,
+  that week's alerts, and request counts. Index sizes are saved once a day under
+  `alerts/sizes/`, so growth figures start one week after the first run.
+- RAM: Elasticsearch doesn't report the OS "available" memory that `free -m` and the CloudWatch
+  agent show, so "RAM (excl. cache)" is an estimate. It leaves out other processes on the host and
+  usually reads a few percent below CloudWatch. `memUsedPercent` (Elasticsearch's own figure)
+  counts the file cache as used and is often 90–99%.
+- With two API workers, one runs each check: `alerts/state.json` records the last run and an S3
+  lock (`locks/_alerts/...`) stops overlaps; the digest is claimed once per week in
+  `alerts/digests/`. Calls to Elasticsearch during a check time out after 15 s. Nothing here
+  changes a cluster.
+- Network: the server needs outbound HTTPS to `hooks.slack.com`.
+
 ## How a change runs
 
 1. Check permission, the reason, and that the type supports the action
@@ -410,6 +451,13 @@ approvals-by-user/{email}/{id}.json          pointer, so each user lists their o
 approvals-mail/{id}.json                     which emails SES accepted or refused (no content)
 state/approvals-pending.json                 index of open requests (Requests count in the top bar)
 shell-history/{email}.json                   each user's last 50 shell requests (only they see it)
+alerts/settings.json                         alert thresholds, repeat intervals, per-cluster overrides
+alerts/state.json                            active alerts, last check, nodes seen per cluster
+alerts/snoozes.json                          snoozes (who, until, reason)
+alerts/history/{date}.json                   alerts that started, changed or cleared that day
+alerts/sizes/{cluster}/{date}.json           index sizes once a day, for the weekly digest
+alerts/digests/{week}.json                   marks that week's digest as sent
+locks/_alerts/run/check.lock                 held while one worker runs an alert check
 ```
 
 `doc-versions/`, `bulk-backups/`, `approvals/` and `shell-history/` can hold document contents (the data being edited). Keep the
@@ -422,6 +470,7 @@ Not in S3: any secret. AWS Secrets Manager holds, under `SECRETS_PREFIX` (defaul
 app                    {"sessionSecret", "bootstrapAdminPassword"}   created on first start
 users/<email>          {"passwordHash"}                             one per console user
 clusters/<clusterId>   {"password"} or {"apiKey"}                   one per Elasticsearch cluster
+slack                  {"webhookUrl"}                               Slack incoming webhook (Admin → Alerts)
 ```
 
 Cluster connection details (URLs, username, TLS) stay on the server in `config/clusters.yaml`
@@ -447,6 +496,8 @@ To make the audit log tamper-proof, turn on S3 Object Lock for `audit/`.
 | `SES_REGION` | `AWS_REGION` | region of the SES identity |
 | `PUBLIC_URL` | — | the console's address used in email links, e.g. `http://172.0.58.49` |
 | `APPROVAL_EXPIRY_DAYS` | `7` | a pending request closes as expired after this |
+| `ALERTS_ENABLED` | `true` | run the alert checks in the background; `false` = only **Check now** in the console |
+| `ALERT_INTERVAL_SECONDS` | `300` | how often every cluster is checked (minimum 60) |
 | `API_PORT` | `8080` | host port docker compose publishes (e.g. `80`) |
 | `CLUSTERS_FILE` | `/app/config/clusters.yaml` | clusters kept in a file (read-only in the console); optional |
 | `MANAGED_CLUSTERS_FILE` | `/app/data/clusters.managed.yaml` | where clusters added in the console / admin API are saved; empty turns adding clusters off |

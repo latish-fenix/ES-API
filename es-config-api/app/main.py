@@ -12,8 +12,10 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 
-from . import (routes_admin, routes_approvals, routes_auth, routes_clusters, routes_config, routes_data,
-               routes_history, routes_shell)
+from . import (routes_admin, routes_alerts, routes_approvals, routes_auth, routes_clusters, routes_config,
+               routes_data, routes_history, routes_shell)
+from .alerts import AlertService
+from .slack import SlackNotifier
 from .approvals import ApprovalService
 from .shell import Shell
 from .mailer import build_mailer
@@ -111,8 +113,14 @@ def _create_app(settings: Settings, store: ObjectStore, registry: ClusterRegistr
                                                 app.state.audit)
     app.state.index_create = IndexCreateService(registry, store, app.state.audit)
     app.state.shell = Shell(app)
+    app.state.slack = SlackNotifier(secrets)
+    app.state.alerts = AlertService(app, store, app.state.slack, settings.alert_interval_seconds)
     app.state.approvals = ApprovalService(store, app.state.users, app.state.audit,
-                                          build_mailer(settings), settings)
+                                          build_mailer(settings), settings,
+                                          on_event=app.state.alerts.request_event)
+    if settings.alerts_background:
+        app.router.on_startup.append(app.state.alerts.start)
+        app.router.on_shutdown.append(app.state.alerts.stop)
     if settings.auth_mode == "password":
         _bootstrap_passwords(settings, app.state.users, bootstrap_pw, secrets)
 
@@ -148,6 +156,7 @@ def _create_app(settings: Settings, store: ObjectStore, registry: ClusterRegistr
     app.include_router(routes_data.router)  # before routes_config: its /{type}/{name} paths are generic
     app.include_router(routes_history.router)
     app.include_router(routes_shell.router)   # before routes_config too
+    app.include_router(routes_alerts.router)  # before routes_config too
     app.include_router(routes_config.router)
     app.include_router(routes_admin.router)
     app.include_router(routes_clusters.router)

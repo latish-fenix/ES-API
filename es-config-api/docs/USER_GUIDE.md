@@ -8,7 +8,7 @@ The ES Config Console is the web page for reading and changing Elasticsearch con
 - **Who it's for:** anyone who changes cluster settings, index settings, mappings, templates, ILM policies or ingest pipelines, developers who need to look at the documents in an index, and the admins who manage who may do what
 - **The one rule to remember:** every change goes **Edit → Dry run → Apply**. The dry run shows exactly what would change and touches nothing. Apply saves the current config as a snapshot first, so one click rolls it back. If you are not an admin, Apply becomes **Request approval** and an admin approves it first
 
-What you can see and do depends on your access on each cluster, and sometimes on each index (see [Access levels](#access-levels)). Admins also get Cluster settings and the Clusters, Users, Allowlist and Audit log pages.
+What you can see and do depends on your access on each cluster, and sometimes on each index (see [Access levels](#access-levels)). Admins also get Cluster settings and the Clusters, Users, Allowlist, Alerts and Audit log pages.
 
 Installing the server from scratch: [FRESH_INSTALL.md](FRESH_INSTALL.md). The languages and services the project is built with: [TECH_STACK.md](TECH_STACK.md).
 
@@ -69,13 +69,17 @@ The **Nodes** card on the Overview shows every node of the cluster, refreshed ev
 | Column | What it shows | Watch for |
 | --- | --- | --- |
 | Node | Name, **master** badge on the elected master, IP, roles, version | — |
-| CPU | CPU use now, and the 1-minute load / number of CPUs | Staying above 75–90% |
-| RAM | Memory used by the whole server | High is normal on Linux (the file cache counts as used) |
-| JVM heap | Elasticsearch's own memory | Above 75% (amber) or 85% (red) for long |
-| Disk used | Used %, and free space of total | The bar turns amber at the *low* watermark (85%: no new shards placed there) and red at the *high* one (90%: shards move away). At 95% indices become read-only |
+| CPU | CPU use now, and the 1-minute load / number of CPUs | Amber from 70%, red from 80% (the alert thresholds) |
+| RAM (excl. cache) | Memory Elasticsearch itself holds, and about how much is free | Amber from 70%, red from 80% |
+| JVM heap | Elasticsearch's own memory | Amber from 70%, red from 80% for long |
+| Disk used | Used %, and free space of total | Amber from 70%, red from 80%. Elasticsearch itself stops placing shards at the *low* watermark (85%), moves shards away at the *high* one (90%), and makes indices read-only at 95% |
 | Shards | Shards on that node | Very uneven numbers between nodes |
 
-The four boxes above the table sum it up: number of nodes, total free disk, average and busiest CPU, average and highest heap.
+The five boxes above the table sum it up: nodes, total free disk, CPU, RAM and heap (averages over the data nodes, and the highest node). The colours follow the alert thresholds, so if an admin changes them for a cluster, the bars change too.
+
+**About RAM.** Linux uses free memory as a file cache, and Elasticsearch counts that cache as used, so its own figure is usually 90–99%. The console shows RAM **without** the cache instead: what Elasticsearch holds (heap, non-heap and direct buffers). Elasticsearch doesn't report the exact "available" figure that `free -m` or CloudWatch show, so this one is an estimate (marked ≈): it leaves out other programs on the server and is usually a few percent below CloudWatch. Hover a RAM bar to see the figure including the cache.
+
+When a cluster has active alerts, a red or amber box at the top of its Overview lists them.
 
 ### Access levels
 
@@ -574,6 +578,76 @@ There is one card per config type:
 **Global vs cluster override.** The **Global** tab applies to every cluster. A cluster's **override** tab replaces the global list for that cluster only: **Create override from global** starts one as a copy, **Remove override** goes back to global.
 
 Every save is recorded in the audit log with the before and after rules.
+
+## Admins: alerts and Slack
+
+**Alerts** (under Administration) is where you connect Slack, see what is wrong right now, snooze alerts and set the thresholds. Every cluster is checked every 5 minutes; nothing here changes a cluster.
+
+![Alerts page](images/51-alerts-page.png)
+
+### Connect Slack (once)
+
+1. In Slack: **Apps → Incoming Webhooks → Add to Slack**, pick the channel, copy the webhook URL.
+2. On the Alerts page: **Set webhook**, paste it, **Save**. It is stored in AWS Secrets Manager (`es-config-api/slack`) and never shown again.
+3. **Send test message** and check the channel.
+
+Alerts, approval requests and the weekly digest all go to that one channel. Until a webhook is set, alerts are still tracked and listed here, just not posted.
+
+### What is checked
+
+| Alert | What it means | Warning / critical |
+| --- | --- | --- |
+| Disk | Disk used on a data node | 70% / 80% |
+| RAM (excl. cache) | Memory Elasticsearch holds on a node (see *About RAM* above) | 70% / 80% |
+| JVM heap | Heap used, above the line for 2 checks in a row | 70% / 80% |
+| CPU | CPU, above the line for 2 checks in a row | 70% / 80% |
+| Shards | Shards in the cluster against its limit (new indices fail at 100%) | 70% / 80% |
+| Cluster health | Yellow or red (unassigned shards) | always critical |
+| Nodes | A node left the cluster, or the cluster stopped answering | always critical |
+
+How often Slack hears about it:
+
+- when an alert starts, and when it gets worse or better (warning ↔ critical)
+- again **every hour** while it is a warning, and **every 5 minutes** while it is critical
+- once more, as **OK again**, when it clears (2 points below the line, so a value hovering on the line doesn't flap)
+
+Each message names the cluster, the node, the value and the line, with a link to the cluster in the console. Approval requests appear in the same channel: new requests, and approved, rejected, failed or expired ones.
+
+### Snooze an alert
+
+**Snooze** on an alert's row (or **Snooze…** above the list for a cluster that has no alert yet):
+
+![Snooze dialog](images/52-alerts-snooze.png)
+
+- **What:** only this alert (one node), every alert of that type on the cluster, or every alert on the cluster
+- **For:** 1 hour, 4 hours, 24 hours, 7 days, or **until it clears** (only for an alert that is active now)
+- **Reason:** required, and kept in the audit log
+
+Snoozing is done in the console only, and nothing about it is posted to Slack. A snoozed alert stays in the list with who snoozed it and until when. **End snooze** (or **End now** under Snoozes) lifts it; if the problem is still there, Slack hears about it at the next check.
+
+**Forget node** appears on a "node left" alert: use it when a node was removed on purpose, so it stops being reported. (A node that comes back clears its alert by itself.)
+
+### Thresholds
+
+![Thresholds for one cluster](images/53-alerts-thresholds.png)
+
+- **Defaults (all clusters):** turn alerts or the weekly digest off, change how often warnings and critical alerts repeat, and set each alert's on/off, warning and critical line.
+- **Pick a cluster** to override some of them for that cluster only (overridden values are in bold; **Use defaults** removes an override), or tick **No alerts at all** for it.
+- The Overview's bars use the same lines, so they turn amber and red where the alerts start.
+
+Turning an alert off removes its active alerts without an "OK again" message.
+
+### Weekly digest
+
+Every **Friday at 15:00 IST** the channel gets a summary per cluster: size, documents and indices with the growth over the week, shards against the limit, disk used, health, the 10 largest and the 10 fastest-growing indices, that week's alerts, and the number of requests submitted, approved, rejected and expired. **Preview** shows it now; **Send now** posts it now (Friday's still comes).
+
+![Digest preview](images/54-alerts-digest.png)
+
+Growth needs a week of history: index sizes are saved once a day, so the first digest after setup says "growth from next week".
+
+### History
+
+The bottom of the page lists when each alert started, changed, cleared or was dropped (today, 7 or 31 days).
 
 ## Admins: the audit log
 

@@ -114,6 +114,16 @@ Changes made by non-admins wait for an admin, and the admins are emailed. To sen
 
 Without SES the console still works: requests wait on the **Requests** page, only the emails are missing (each request shows whether its emails went out).
 
+### Step 3c: Let the server reach Slack (alerts)
+
+Alerts, request notices and the weekly digest go to a Slack channel through an incoming webhook, which you paste in the console in Step 7. Its URL is kept in Secrets Manager as `es-config-api/slack`; the role's Secrets Manager statement already covers it (`es-config-api/*`). The only thing to check here is the network: the server needs outbound HTTPS to `hooks.slack.com`.
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' -X POST https://hooks.slack.com/services/x   # 404 or 403 = reachable; 000 = blocked
+```
+
+If it prints `000`, allow outbound 443 in the instance's security group / NAT (or through your proxy).
+
 ## Step 4: Create a new Elasticsearch account and remove the old ones
 
 Do this on **each cluster** that has security turned on, in Kibana → Dev Tools as a superuser. A cluster with security off needs nothing here: you add it later without a password.
@@ -176,7 +186,8 @@ In `.env`, set these lines and leave the rest as they are:
 | `AWS_REGION` | `us-west-2` | Region of the bucket, the secrets and SES |
 | `SECRETS_LEGACY_REGION` | empty on a fresh install | Only when secrets from an older install are still in `us-east-1`: set `us-east-1` and they move over (see the README) |
 | `MAIL_FROM` | `fenix_int_product_alerts@fenixcommerce.com` | Sender of the approval emails (verified in Step 3b) |
-| `PUBLIC_URL` | `http://172.0.58.49` | The console's address, used for links in the emails |
+| `PUBLIC_URL` | `https://es-config-int.fenixcommerce.com` | The console's address, used for links in emails and Slack |
+| `ALERTS_ENABLED` | `true` | Checks every cluster every 5 minutes and posts problems to Slack |
 | `SECRETS_BACKEND` | `aws` | Every secret in AWS Secrets Manager |
 | `SECRETS_PREFIX` | `es-config-api/` | Secret names start with this |
 | `BOOTSTRAP_ADMINS` | `latish.madapada@fenixcommerce.com` | The first admin (comma-separate several) |
@@ -230,6 +241,8 @@ docker compose exec es-config-api python -m app.cli secrets-status
    - **Test connection** → green → **Add cluster**.
 4. **Open up what people may change**: **Administration → Allowlist**. Every config type starts locked; unlock the types and add the name patterns you want (see the User Guide).
 5. **Add people**: **Administration → Users → Add users**. Enter emails, pick each person's level per cluster (and index rules if needed), **Create**, then **Download CSV** and hand each person their password. Delete the CSV afterwards. Their changes will wait for your approval on the **Requests** page; you get an email for each one.
+
+6. **Connect Slack**: **Administration → Alerts → Set webhook** (Slack → Apps → Incoming Webhooks → pick the channel → copy the URL), then **Send test message**. Alerts start at the next 5-minute check; the weekly digest comes on Fridays at 15:00 IST.
 
 You now have one admin, your clusters and your people, and nothing from the old installation.
 

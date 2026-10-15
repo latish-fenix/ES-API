@@ -45,6 +45,14 @@ const HUMAN: Record<string, string> = {
   APPROVAL_OUTDATED: "Request outdated",
   APPROVAL_FAILED: "Approved, failed",
   SHELL_QUERY: "Shell query",
+  ALERT_SETTINGS_UPDATE: "Alert settings changed",
+  ALERT_WEBHOOK_UPDATE: "Slack webhook set",
+  ALERT_WEBHOOK_DELETE: "Slack webhook removed",
+  ALERT_TEST: "Slack test message",
+  ALERT_SNOOZE: "Alert snoozed",
+  ALERT_UNSNOOZE: "Snooze ended",
+  ALERT_CLEAR: "Node alert cleared",
+  ALERT_DIGEST_SEND: "Digest sent by hand",
 };
 
 export function actionLabel(e: AuditEvent): string {

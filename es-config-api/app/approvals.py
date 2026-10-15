@@ -293,6 +293,7 @@ class ApprovalService:
     mailer: Mailer
     settings: Any
     async_mail: bool = True
+    on_event: Callable[[dict], None] | None = None    # e.g. Slack: new request / outcome
     _pool: ThreadPoolExecutor | None = field(default=None, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
@@ -624,8 +625,17 @@ class ApprovalService:
         text, body = render("Approval needed", rows, intro, self._link(rec["id"]), "Review the request")
         subject = f"Approval needed: {rec['label']} {rec['resource']} on {rec.get('clusterId')} ({rec['requestedBy']})"
         self._send(rec["id"], "admins", to, subject, text, body)
+        self._event(rec)
+
+    def _event(self, rec: dict) -> None:
+        if self.on_event:
+            try:
+                self.on_event(rec)
+            except Exception:
+                log.exception("request notification failed")
 
     def _notify_requester(self, rec: dict) -> None:
+        self._event(rec)
         if "@" not in rec["requestedBy"]:
             return
         st = rec["status"]

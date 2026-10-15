@@ -53,6 +53,11 @@ class Settings:
     public_url: str = ""                      # console address used in email links, e.g. http://172.0.58.49
     approval_expiry_days: int = 7
 
+    # Alerts to Slack (webhook in Secrets Manager, set in Admin → Alerts). The background check
+    # runs only when the app is started from the environment (from_env), never in tests.
+    alerts_background: bool = False
+    alert_interval_seconds: int = 300
+
     # Behaviour
     lock_ttl_seconds: int = 600
     audit_query_limit: int = 500
@@ -80,6 +85,8 @@ class Settings:
             ses_region=env("SES_REGION") or None,
             public_url=env("PUBLIC_URL", "").rstrip("/"),
             approval_expiry_days=int(env("APPROVAL_EXPIRY_DAYS", "7")),
+            alerts_background=env("ALERTS_ENABLED", "true").lower() in ("1", "true", "yes"),
+            alert_interval_seconds=int(env("ALERT_INTERVAL_SECONDS", "300")),
             local_secrets_dir=env("LOCAL_SECRETS_DIR", "./.local-secrets"),
             s3_bucket=env("S3_BUCKET", ""),
             s3_prefix=prefix,

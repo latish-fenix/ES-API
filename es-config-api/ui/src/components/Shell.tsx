@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createContext, Fragment, useContext, useEffect, useId, useState, type ReactNode } from "react";
 import { Link, NavLink, Outlet, useLocation, useNavigate, useParams } from "react-router-dom";
-import { NAMED_TYPES, get, request, setApprovalHandler } from "../api";
+import { NAMED_TYPES, get, request, setApprovalHandler, type AlertsOverview } from "../api";
 import { NAMED_META } from "../format";
 import { lastCluster, rememberCluster, useClusters, useHealth, useMe } from "../session";
 
@@ -22,6 +22,17 @@ function NavItem({ to, icon, label, end, count, countTitle }: { to: string; icon
       {!!count && <span className="nav-count" title={countTitle} aria-label={countTitle}>{count}</span>}
     </NavLink>
   );
+}
+
+function useAlertCount(enabled: boolean) {
+  return useQuery({
+    queryKey: ["alerts"],
+    queryFn: () => get<AlertsOverview>("/admin/alerts"),
+    refetchInterval: 60_000,
+    staleTime: 20_000,
+    enabled,
+    select: (d) => d.active.filter((a) => !a.snoozedBy),
+  });
 }
 
 export function useApprovalCount() {
@@ -79,6 +90,8 @@ export function Shell() {
     });
   }, [qc, toast]);
   const waiting = me.admin ? counts?.pending ?? 0 : counts?.mine ?? 0;
+  const alerts = useAlertCount(me.admin).data ?? [];
+  const critical = alerts.filter((a) => a.severity === "critical").length;
 
   useEffect(() => {
     if (params.clusterId) rememberCluster(params.clusterId);
@@ -128,6 +141,8 @@ export function Shell() {
             <NavItem to="/admin/clusters" icon="server" label="Clusters" />
             <NavItem to="/admin/users" icon="users" label="Users" />
             <NavItem to="/admin/allowlist" icon="shield" label="Allowlist" />
+            <NavItem to="/admin/alerts" icon="bell" label="Alerts" count={alerts.length}
+              countTitle={`${alerts.length} active alert${alerts.length === 1 ? "" : "s"}${critical ? `, ${critical} critical` : ""}`} />
             <NavItem to="/admin/audit" icon="list" label="Audit log" />
           </div>
         )}

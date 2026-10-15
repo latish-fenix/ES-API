@@ -273,6 +273,9 @@ export interface NodeRow {
   memTotalBytes: number | null;
   memUsedBytes: number | null;
   memUsedPercent: number | null;
+  ramUsedBytes: number | null;
+  ramUsedPercent: number | null;
+  ramFreeBytes: number | null;
   heapUsedBytes: number | null;
   heapMaxBytes: number | null;
   heapUsedPercent: number | null;
@@ -294,6 +297,8 @@ export interface NodeStats {
     cpuPercentAvg: number | null;
     cpuPercentMax: number | null;
     memUsedPercentAvg: number | null;
+    ramUsedPercentAvg: number | null;
+    ramUsedPercentMax: number | null;
     heapUsedPercentAvg: number | null;
     heapUsedPercentMax: number | null;
   };
@@ -590,3 +595,91 @@ export const NAMED_TYPES = ["index-templates", "component-templates", "ilm-polic
 export type NamedType = (typeof NAMED_TYPES)[number];
 
 export const enc = encodeURIComponent;
+
+// ------------------------------------------------------------------ alerts
+
+export type AlertMetric = "disk" | "ram" | "heap" | "cpu" | "shards" | "health" | "nodes";
+export type Severity = "warning" | "critical";
+
+export interface MetricRule { on?: boolean; warn?: number; crit?: number }
+
+export interface AlertSettings {
+  enabled: boolean;
+  repeatMinutes: { warning: number; critical: number };
+  defaults: Record<AlertMetric, MetricRule>;
+  clusters: Record<string, { off?: boolean; metrics: Partial<Record<AlertMetric, MetricRule>> }>;
+  digest: { enabled: boolean };
+  updatedBy?: string;
+  updatedAt?: string;
+}
+
+export interface Snooze {
+  id: string;
+  clusterId: string;
+  metric: AlertMetric | null;
+  node: string | null;
+  duration: string;
+  until: string | null;
+  untilResolved: boolean;
+  by: string;
+  reason: string;
+  createdAt: string;
+}
+
+export interface ActiveAlert {
+  key: string;
+  clusterId: string;
+  metric: AlertMetric;
+  node: string;
+  severity: Severity;
+  value: number | null;
+  threshold?: number;
+  detail?: string;
+  text?: string;
+  since: string;
+  updatedAt: string;
+  lastSentAt?: string;
+  snoozedBy?: Pick<Snooze, "id" | "by" | "until" | "untilResolved" | "reason"> | null;
+}
+
+export interface AlertRun {
+  at: string;
+  worker: string;
+  clusters: Record<string, { ok: boolean; error?: string }>;
+  slack: string | null;
+  messages: number;
+  durationMs: number;
+  disabled?: boolean;
+}
+
+export interface AlertsOverview {
+  active: ActiveAlert[];
+  snoozes: Snooze[];
+  lastRun: AlertRun | null;
+  lastDigest: string | null;
+  digestWhen: string;
+  intervalSeconds: number;
+  settings: AlertSettings;
+  slack: { configured: boolean; lastError: string | null; secret: string };
+}
+
+export interface AlertEvent {
+  at: string;
+  event: "FIRING" | "ESCALATED" | "EASED" | "RESOLVED" | "CLEARED" | "DROPPED" | "DIGEST";
+  key: string;
+  clusterId: string;
+  metric: string;
+  node: string | null;
+  severity: string;
+  value: number | null;
+  threshold: number | null;
+  text: string | null;
+  by?: string;
+  ok?: boolean;
+}
+
+export interface ClusterAlerts {
+  active: ActiveAlert[];
+  thresholds: Record<"disk" | "ram" | "heap" | "cpu" | "shards", MetricRule>;
+  lastRunAt: string | null;
+}

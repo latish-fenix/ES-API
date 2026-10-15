@@ -206,6 +206,15 @@ read-only response editor. Non-GET requests are sent with `dryRun: true` first; 
 before the real call. History comes from `…/shell/history`; **Copy as curl** builds the API
 call.
 
+### Alerts (`pages/admin/Alerts.tsx`)
+
+One query, `["alerts"]` → `GET /admin/alerts` (active alerts, snoozes, settings, Slack status, last
+check), refetched every 30 s; the sidebar's **Alerts** count uses the same key (unsnoozed alerts).
+`Thresholds` edits a draft of the whole settings object (defaults plus per-cluster overrides, which
+hold only the fields that differ) and `PUT`s it. Snoozes and the webhook are their own dialogs.
+The Overview reads `GET /clusters/{id}/alerts` for its alert box and to colour the node meters
+with the cluster's thresholds; `describeAlert` and `SeverityBadge` are shared from this page.
+
 ### Errors
 
 `ApiError` carries `status`, `code`, `message`, `details` and the response's `X-Request-ID`.

@@ -75,7 +75,7 @@ There is no database server, message queue or cache service.
 
 | Tool | Used for |
 | --- | --- |
-| **pytest** 8 | 93 tests in `tests/`, run against a real Elasticsearch 8.17 (they also pass on 7.9.1) |
+| **pytest** 8 | 105 tests in `tests/`, run against a real Elasticsearch 8.17 (they also pass on 7.9.1) |
 | **moto** 5 | Simulates S3, Secrets Manager (both regions) and SES in the tests |
 | **httpx** / FastAPI `TestClient`, **requests** | Calling the API in tests and in `scripts/smoke_test.py` |
 | **TypeScript compiler** (`tsc -b`) | Type-checks the console on every build |

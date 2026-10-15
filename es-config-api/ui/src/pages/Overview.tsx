@@ -1,12 +1,36 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
-import { enc, get, NAMED_TYPES, type AuditEvent, type IndexRow, type NodeRow, type NodeStats, type Rules } from "../api";
+import { enc, get, NAMED_TYPES, type AuditEvent, type ClusterAlerts, type IndexRow, type NodeRow, type NodeStats, type Rules } from "../api";
 import { Icon } from "../components/icons";
 import { Page } from "../components/Shell";
-import { Badge, ErrorCallout, HealthDot, Loading } from "../components/ui";
+import { Badge, Callout, ErrorCallout, HealthDot, Loading } from "../components/ui";
 import { bytes, CONFIG_TYPE_LABEL, LEVEL_LABEL, NAMED_META, nf, num, todayUtc, when } from "../format";
 import { useAdminClusters, useCluster, useClusters, useHealth } from "../session";
+import { describeAlert, SeverityBadge } from "./admin/Alerts";
 import { AuditOutcome, actionLabel } from "./admin/Audit";
+
+function useClusterAlerts(clusterId: string) {
+  return useQuery({
+    queryKey: ["cluster-alerts", clusterId],
+    queryFn: () => get<ClusterAlerts>(`/clusters/${enc(clusterId)}/alerts`),
+    refetchInterval: 60_000,
+  });
+}
+
+function ActiveAlerts({ clusterId, admin }: { clusterId: string; admin: boolean }) {
+  const q = useClusterAlerts(clusterId);
+  const items = q.data?.active ?? [];
+  if (!items.length) return null;
+  const crit = items.some((a) => a.severity === "critical");
+  return (
+    <Callout tone={crit ? "danger" : "warn"} title={`${items.length} active alert${items.length === 1 ? "" : "s"}`}>
+      <ul style={{ margin: "4px 0 0", paddingLeft: 18 }}>
+        {items.map((a) => <li key={a.key}><SeverityBadge s={a.severity} /> {describeAlert(a)}</li>)}
+      </ul>
+      {admin && <div style={{ marginTop: 6 }}><Link to="/admin/alerts">Alerts and snoozes</Link></div>}
+    </Callout>
+  );
+}
 
 function allowSummary(type: string, rules: Rules): string {
   const r = rules[type];
@@ -16,11 +40,16 @@ function allowSummary(type: string, rules: Rules): string {
   return r.allow.length ? `${r.allow.slice(0, 3).join(", ")}${r.allow.length > 3 ? ` +${r.allow.length - 3}` : ""}` : "Locked";
 }
 
-function Meter({ pct, warn = 75, danger = 90, label, note }: { pct: number | null | undefined; warn?: number | null; danger?: number | null; label: string; note?: string }) {
+const RAM_HELP = "Memory Elasticsearch itself holds (heap, non-heap and direct buffers) as a share of the node's RAM. "
+  + "The OS file cache is left out because the OS frees it when needed. Elasticsearch doesn't report the OS "
+  + "'available' figure, so this is an estimate: other processes on the host aren't counted, and it usually "
+  + "reads a few percent below what free -m or CloudWatch show.";
+
+function Meter({ pct, warn = 75, danger = 90, label, note, extra }: { pct: number | null | undefined; warn?: number | null; danger?: number | null; label: string; note?: string; extra?: string }) {
   if (pct === null || pct === undefined) return <span className="hint">—</span>;
   const tone = danger != null && pct >= danger ? "danger" : warn != null && pct >= warn ? "warn" : "ok";
   return (
-    <div className="meter" title={note ? `${label}: ${pct}% · ${note}` : `${label}: ${pct}%`}>
+    <div className="meter" title={[`${label}: ${pct}%`, note, extra].filter(Boolean).join(" · ")}>
       <div className="meter-top"><span className="mono">{Math.round(pct)}%</span>{note && <span className="hint">{note}</span>}</div>
       <div className="meter-track" role="meter" aria-label={label} aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(pct)}>
         <div className={`meter-fill ${tone}`} style={{ width: `${Math.min(100, Math.max(0, pct))}%` }} />
@@ -46,6 +75,8 @@ function Nodes({ clusterId }: { clusterId: string }) {
   });
   const d = q.data;
   const wm = d?.watermarks;
+  const th = useClusterAlerts(clusterId).data?.thresholds;
+  const t = (m: "disk" | "ram" | "heap" | "cpu", w: number, c: number) => ({ warn: th?.[m]?.warn ?? w, danger: th?.[m]?.crit ?? c });
   return (
     <section className="card">
       <div className="card-head">
@@ -56,7 +87,7 @@ function Nodes({ clusterId }: { clusterId: string }) {
       </div>
       {q.isLoading ? <Loading what="Reading node stats…" /> : q.error ? <div className="card-body"><ErrorCallout error={q.error} clusterId={clusterId} /></div> : d && (
         <>
-          <div className="stats" style={{ padding: "0 18px 16px", gridTemplateColumns: "repeat(4, minmax(0, 1fr))" }}>
+          <div className="stats" style={{ padding: "0 18px 16px", gridTemplateColumns: "repeat(5, minmax(0, 1fr))" }}>
             <div className="stat">
               <span className="stat-label">Nodes</span>
               <span className="stat-value">{d.summary.nodes}</span>
@@ -72,15 +103,20 @@ function Nodes({ clusterId }: { clusterId: string }) {
               <span className="stat-value">{d.summary.cpuPercentAvg ?? "—"}%</span>
               <span className="stat-note">average · busiest node {d.summary.cpuPercentMax ?? "—"}%</span>
             </div>
+            <div className="stat" title={RAM_HELP}>
+              <span className="stat-label">RAM used (excl. cache)</span>
+              <span className="stat-value">≈ {d.summary.ramUsedPercentAvg ?? "—"}%</span>
+              <span className="stat-note">data-node average · highest {d.summary.ramUsedPercentMax ?? "—"}%</span>
+            </div>
             <div className="stat">
               <span className="stat-label">JVM heap</span>
               <span className="stat-value">{d.summary.heapUsedPercentAvg ?? "—"}%</span>
-              <span className="stat-note">average · highest {d.summary.heapUsedPercentMax ?? "—"}% · RAM {d.summary.memUsedPercentAvg ?? "—"}%</span>
+              <span className="stat-note">data-node average · highest {d.summary.heapUsedPercentMax ?? "—"}%</span>
             </div>
           </div>
           <div className="table-scroll" style={{ maxHeight: 520 }}>
             <table className="table compact nodes-table">
-              <thead><tr><th>Node</th><th>CPU</th><th>RAM</th><th>JVM heap</th><th>Disk used</th><th className="num">Shards</th></tr></thead>
+              <thead><tr><th>Node</th><th>CPU</th><th title={RAM_HELP}>RAM (excl. cache)</th><th>JVM heap</th><th>Disk used</th><th className="num">Shards</th></tr></thead>
               <tbody>
                 {d.nodes.map((n) => (
                   <tr key={n.id}>
@@ -91,10 +127,10 @@ function Nodes({ clusterId }: { clusterId: string }) {
                       </div>
                       <div className="hint">{[n.ip, roleText(n), n.version && `v${n.version}`].filter(Boolean).join(" · ")}</div>
                     </td>
-                    <td><Meter pct={n.cpuPercent} label={`CPU on ${n.name}`} note={n.load1m != null ? `load ${n.load1m}${n.cpus ? ` / ${n.cpus} cpu` : ""}` : undefined} /></td>
-                    <td><Meter pct={n.memUsedPercent} warn={90} danger={97} label={`RAM on ${n.name}`} note={`${bytes(n.memUsedBytes)} of ${bytes(n.memTotalBytes)}`} /></td>
-                    <td><Meter pct={n.heapUsedPercent} warn={75} danger={85} label={`Heap on ${n.name}`} note={`${bytes(n.heapUsedBytes)} of ${bytes(n.heapMaxBytes)}`} /></td>
-                    <td><Meter pct={n.diskUsedPercent} warn={wm?.low ?? 85} danger={wm?.high ?? 90} label={`Disk on ${n.name}`} note={n.diskTotalBytes ? `${bytes(n.diskAvailableBytes)} free of ${bytes(n.diskTotalBytes)}` : undefined} /></td>
+                    <td><Meter pct={n.cpuPercent} {...t("cpu", 70, 80)} label={`CPU on ${n.name}`} note={n.load1m != null ? `load ${n.load1m}${n.cpus ? ` / ${n.cpus} cpu` : ""}` : undefined} /></td>
+                    <td><Meter pct={n.ramUsedPercent} {...t("ram", 70, 80)} label={`RAM used excluding cache on ${n.name} (estimate)`} note={`≈ ${bytes(n.ramFreeBytes)} free of ${bytes(n.memTotalBytes)}`} extra={n.memUsedPercent != null ? `Including file cache: ${n.memUsedPercent}%` : undefined} /></td>
+                    <td><Meter pct={n.heapUsedPercent} {...t("heap", 70, 80)} label={`Heap on ${n.name}`} note={`${bytes(n.heapUsedBytes)} of ${bytes(n.heapMaxBytes)}`} /></td>
+                    <td><Meter pct={n.diskUsedPercent} {...t("disk", 70, 80)} label={`Disk on ${n.name}`} note={n.diskTotalBytes ? `${bytes(n.diskAvailableBytes)} free of ${bytes(n.diskTotalBytes)}` : undefined} /></td>
                     <td className="num">{n.shards ?? "—"}</td>
                   </tr>
                 ))}
@@ -158,6 +194,7 @@ export function Overview() {
       </div>
 
       {health.error && <ErrorCallout error={health.error} clusterId={clusterId} admin={admin} />}
+      <ActiveAlerts clusterId={clusterId} admin={admin} />
 
       <div className="stats">
         <div className="stat">

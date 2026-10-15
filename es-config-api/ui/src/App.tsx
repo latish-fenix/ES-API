@@ -2,6 +2,7 @@ import { Link, Navigate, Route, Routes } from "react-router-dom";
 import { NAMED_TYPES } from "./api";
 import { Page, Shell } from "./components/Shell";
 import { Empty, Loading } from "./components/ui";
+import { Alerts } from "./pages/admin/Alerts";
 import { Allowlist } from "./pages/admin/Allowlist";
 import { Audit } from "./pages/admin/Audit";
 import { Clusters } from "./pages/admin/Clusters";
@@ -73,6 +74,7 @@ export function App() {
         <Route path="admin/users" element={<RequireAdmin><Users /></RequireAdmin>} />
         <Route path="admin/allowlist" element={<RequireAdmin><Allowlist /></RequireAdmin>} />
         <Route path="admin/audit" element={<RequireAdmin><Audit /></RequireAdmin>} />
+        <Route path="admin/alerts" element={<RequireAdmin><Alerts /></RequireAdmin>} />
         <Route path="*" element={<NotFound />} />
       </Route>
     </Routes>

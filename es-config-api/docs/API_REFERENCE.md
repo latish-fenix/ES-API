@@ -219,16 +219,18 @@ curl -s -H "Authorization: Bearer $TOKEN" http://172.0.58.49/api/v1/clusters/elk
    "roles": ["data", "ingest", "master", "ml"], "master": true, "data": true,
    "cpuPercent": 12, "load1m": 0.12, "cpus": 2,
    "memTotalBytes": 6273757184, "memUsedBytes": 2333827072, "memUsedPercent": 37,
+   "ramUsedBytes": 1265250250, "ramUsedPercent": 20.2, "ramFreeBytes": 5008506934,
    "heapUsedBytes": 505386352, "heapMaxBytes": 1073741824, "heapUsedPercent": 47,
    "diskTotalBytes": 270553174016, "diskAvailableBytes": 28409073664, "diskUsedPercent": 89.5,
    "shards": 10, "uptimeMillis": 2101268}],
  "summary": {"nodes": 1, "dataNodes": 1, "diskTotalBytes": 270553174016, "diskAvailableBytes": 28409073664,
    "diskUsedPercent": 89.5, "cpuPercentAvg": 12.0, "cpuPercentMax": 12, "memUsedPercentAvg": 37.0,
+   "ramUsedPercentAvg": 20.2, "ramUsedPercentMax": 20.2,
    "heapUsedPercentAvg": 47.0, "heapUsedPercentMax": 47},
  "watermarks": {"low": 85.0, "high": 90.0, "flood": 95.0}}
 ```
 
-`diskAvailableBytes` is what Elasticsearch can still use (it compares that with the watermarks). `memUsedPercent` is the operating system's view and includes the file-system cache on Linux, so a high value is normal; watch `heapUsedPercent` and disk instead.
+`diskAvailableBytes` is what Elasticsearch can still use (it compares that with the watermarks). `ramUsedPercent` is RAM without the OS file cache: the memory Elasticsearch holds (heap committed + non-heap committed + direct buffers) over the node's RAM, and `ramFreeBytes` the rest. Elasticsearch doesn't report the OS "available" figure that `free -m` and CloudWatch show, so it is an estimate (other processes on the host aren't counted; usually a few percent below CloudWatch). `memUsedPercent` is Elasticsearch's own figure and counts the file cache as used, so 90–99% is normal there. Summary averages are over data nodes.
 
 ## Cluster settings
 
@@ -1074,6 +1076,102 @@ Anything else (`_reindex`, `_forcemerge`, `_close`, `_snapshot`, `_security`, tr
 
 Your last 50 requests on this cluster (method, path, body), newest first. Only you see them. `POST …/shell/history/_clear` forgets them.
 
+## Alerts
+
+Admins only, except the per-cluster read. What is checked and when: see the README (*Alerts (Slack) and the weekly digest*). Snoozes are made here or in the console, never from Slack.
+
+### GET /api/v1/admin/alerts
+
+Active alerts (with their snooze, if any), snoozes, settings, Slack status (never the webhook) and the last check.
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" http://172.0.58.49/api/v1/admin/alerts
+```
+
+```json
+{"active": [{"key": "elkm2-prod|disk|node-1", "clusterId": "elkm2-prod", "metric": "disk", "node": "node-1",
+   "severity": "critical", "value": 83.4, "threshold": 80, "since": "2026-10-15T06:20:00Z",
+   "lastSentAt": "2026-10-15T06:25:00Z", "lastSentSeverity": "critical", "snoozedBy": null}],
+ "snoozes": [], "lastRun": {"at": "2026-10-15T06:25:00Z", "clusters": {"elkm2-prod": {"ok": true}}, "messages": 1,
+   "slack": null, "durationMs": 840},
+ "lastDigest": "2026-W41", "digestWhen": "Fridays 15:00 IST", "intervalSeconds": 300,
+ "settings": {"enabled": true, "repeatMinutes": {"warning": 60, "critical": 5},
+   "defaults": {"disk": {"on": true, "warn": 70, "crit": 80}, "ram": {"on": true, "warn": 70, "crit": 80},
+     "heap": {"on": true, "warn": 70, "crit": 80}, "cpu": {"on": true, "warn": 70, "crit": 80},
+     "shards": {"on": true, "warn": 70, "crit": 80}, "health": {"on": true}, "nodes": {"on": true}},
+   "clusters": {}, "digest": {"enabled": true}},
+ "slack": {"configured": true, "lastError": null, "secret": "es-config-api/slack"}}
+```
+
+`metric` is one of `disk`, `ram`, `heap`, `cpu`, `shards`, `health`, `nodes` (`nodes` with an empty `node` = the cluster isn't answering).
+
+### PUT /api/v1/admin/alerts/settings
+
+The whole settings object (anything left out gets its default). Per-cluster overrides hold only what differs; `"off": true` silences a cluster.
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -X PUT http://172.0.58.49/api/v1/admin/alerts/settings -d '{"repeatMinutes": {"warning": 60, "critical": 5}, "defaults": {"disk": {"warn": 70, "crit": 80}}, "clusters": {"common-elkop2": {"metrics": {"disk": {"warn": 75, "crit": 85}}}}}'
+```
+
+Errors: `INVALID_ALERT_SETTINGS` (unknown metric or cluster, warning above critical, values outside 1–100, repeat outside 5–1440 minutes). Audited as `ALERT_SETTINGS_UPDATE` with before/after.
+
+### PUT /api/v1/admin/alerts/slack · DELETE · POST …/slack/_test
+
+Set (or replace) the webhook, remove it, or post a test message. The URL must start with `https://hooks.slack.com/`; it goes to Secrets Manager (`<prefix>slack`) and is never returned or audited.
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -X PUT http://172.0.58.49/api/v1/admin/alerts/slack -d '{"webhookUrl": "https://hooks.slack.com/services/…"}'
+curl -s -H "Authorization: Bearer $TOKEN" -X POST http://172.0.58.49/api/v1/admin/alerts/slack/_test
+```
+
+```json
+{"ok": true}
+```
+
+A refused post gives `{"ok": false, "error": "Slack answered 404: no_service (the webhook no longer exists (create a new one in Slack))"}`.
+
+### POST /api/v1/admin/alerts/snoozes · DELETE /api/v1/admin/alerts/snoozes/{id}
+
+Silence alerts in Slack. Leave out `metric` for every alert of the cluster; `node` needs `metric`. `duration`: `1h`, `4h`, `24h`, `7d` or `resolved` (until it clears; only while something it covers is active, else `NOTHING_TO_SNOOZE`). `reason` is required.
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -X POST http://172.0.58.49/api/v1/admin/alerts/snoozes -d '{"clusterId": "bombas-elkop3", "metric": "disk", "duration": "4h", "reason": "Cleanup of old logs tonight"}'
+```
+
+```json
+{"id": "20261015T062833-3fa9c1", "clusterId": "bombas-elkop3", "metric": "disk", "node": null, "duration": "4h",
+ "until": "2026-10-15T10:28:33Z", "untilResolved": false, "by": "latish.madapada@fenixcommerce.com",
+ "reason": "Cleanup of old logs tonight", "createdAt": "2026-10-15T06:28:33Z"}
+```
+
+Audited as `ALERT_SNOOZE` / `ALERT_UNSNOOZE`. Nothing is posted to Slack.
+
+### POST /api/v1/admin/alerts/_check
+
+Check every cluster now, exactly like the 5-minute check (posts what is due). `409 CHECK_IN_PROGRESS` while a check is running.
+
+### POST /api/v1/admin/alerts/active/{key}/_clear
+
+Forget a node that was removed on purpose (only `nodes` alerts with a node name). Its key has `|` characters: URL-encode it (`%7C`).
+
+### GET /api/v1/admin/alerts/history
+
+`?days=7` (1–31), `?clusterId=`. Events: `FIRING`, `ESCALATED`, `EASED`, `RESOLVED`, `DROPPED` (its check was turned off or its node left), `CLEARED`, `DIGEST`.
+
+### GET /api/v1/admin/alerts/digest/_preview · POST …/digest/_send
+
+The weekly digest as data and as the Slack message, or post it now (the Friday 15:00 IST one is still sent).
+
+### GET /api/v1/clusters/{clusterId}/alerts
+
+Anyone with access to the cluster: its active alerts and the thresholds that apply (the console's Overview uses them).
+
+```json
+{"active": [], "thresholds": {"disk": {"on": true, "warn": 70, "crit": 80}, "ram": {"on": true, "warn": 70, "crit": 80},
+ "heap": {"on": true, "warn": 70, "crit": 80}, "cpu": {"on": true, "warn": 70, "crit": 80},
+ "shards": {"on": true, "warn": 70, "crit": 80}}, "lastRunAt": "2026-10-15T06:25:00Z"}
+```
+
 ## Admin API
 
 Admins only (users with `admin: true`, or listed in `BOOTSTRAP_ADMINS`). Every change made here is written to the audit log.
@@ -1493,5 +1591,11 @@ Every error has the same shape: an HTTP status, a stable `code`, a readable `mes
 | 502 | `SECRETS_UNAVAILABLE` | AWS Secrets Manager couldn't be reached (network, VPC endpoint) |
 | 502 | `ES_READ_NOT_ALLOWED` | Data browser: the API's Elasticsearch account lacks the `read` index privilege; add it to `config_api_writer` (`docs/es-lockdown.md`) |
 | 502 | `ES_UNAVAILABLE` | Elasticsearch returned a 5xx or 429; retry, and check the cluster |
+| 400 | `INVALID_WEBHOOK` | Alerts: paste a Slack incoming-webhook URL (`https://hooks.slack.com/services/…`) |
+| 400 | `INVALID_ALERT_SETTINGS` | Alerts: unknown metric or cluster, warning above critical, or a value out of range |
+| 400 | `INVALID_SNOOZE`, `NOTHING_TO_SNOOZE` | Snooze: unknown metric / node without a metric; "until it clears" with nothing active to wait for |
+| 400 | `NOT_CLEARABLE` | Only "node left" alerts can be cleared by hand |
+| 404 | `ALERT_NOT_FOUND`, `SNOOZE_NOT_FOUND` | The alert cleared, or the snooze ended, meanwhile |
+| 409 | `CHECK_IN_PROGRESS` | An alert check is running; try again in a minute |
 
 Every response carries an `X-Request-ID` header; quote it when reporting a problem, since the same id is in the audit log.
