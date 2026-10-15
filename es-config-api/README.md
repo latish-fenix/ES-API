@@ -371,6 +371,17 @@ until AWS grants production access).
   aggregation names, never values or results. Each user's last 50 requests are kept in
   `shell-history/` for them only.
 
+## Dashboard
+
+The console opens on a table of every cluster the user can access (admins: all): health,
+nodes, active alerts, disk / RAM / heap / CPU (worst node and average, coloured by the alert
+thresholds), shards against the limit, size and 7-day growth, and a 24-hour trend; below it a
+chart per metric over 24 hours or 7 days. The page re-reads each cluster every 2 minutes,
+each on its own (`GET /clusters/{id}/summary`, 15-second timeout, no retries), so a slow cluster
+only delays its own row. Trend points come from the 5-minute alert check
+(`GET /clusters/{id}/trends`), which keeps reading clusters even when alerts are turned off
+(`ALERTS_ENABLED=false` stops it, and with it the trends).
+
 ## Alerts (Slack) and the weekly digest
 
 Every `ALERT_INTERVAL_SECONDS` (default 300) the API checks every cluster and posts problems to
@@ -457,6 +468,7 @@ alerts/snoozes.json                          snoozes (who, until, reason)
 alerts/history/{date}.json                   alerts that started, changed or cleared that day
 alerts/sizes/{cluster}/{date}.json           index sizes once a day, for the weekly digest
 alerts/digests/{week}.json                   marks that week's digest as sent
+alerts/metrics/{cluster}/{date}.json         one sample per check (worst node: disk, RAM, heap, CPU, shards %), kept 8 days, for the dashboard
 locks/_alerts/run/check.lock                 held while one worker runs an alert check
 ```
 

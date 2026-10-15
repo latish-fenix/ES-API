@@ -683,3 +683,36 @@ export interface ClusterAlerts {
   thresholds: Record<"disk" | "ram" | "heap" | "cpu" | "shards", MetricRule>;
   lastRunAt: string | null;
 }
+
+// ------------------------------------------------------------------ dashboard
+
+export interface ResourceStat { avg: number | null; max: number | null; maxNode: string | null }
+
+export interface ClusterSummary {
+  clusterId: string;
+  name: string;
+  checkedAt: string;
+  reachable?: boolean;
+  error?: string;
+  errorCode?: string;
+  status?: "green" | "yellow" | "red";
+  clusterName?: string;
+  versions?: string[];
+  legacy?: boolean;
+  nodes?: number;
+  dataNodes?: number;
+  unassignedShards?: number;
+  disk?: ResourceStat & { freeBytes: number; totalBytes: number };
+  ram?: ResourceStat;
+  heap?: ResourceStat;
+  cpu?: ResourceStat;
+  shards?: { total: number; limit: number | null; perNode: number; percent: number | null };
+  size?: { storeBytes: number | null; docs: number | null; indices: number | null };
+  growth: { bytes: number; docs: number; from: string; to: string; days: number } | null;
+  alerts: { critical: number; warning: number; snoozed: number };
+  thresholds: Record<"disk" | "ram" | "heap" | "cpu" | "shards", MetricRule>;
+}
+
+export type TrendMetric = "disk" | "ram" | "heap" | "cpu";
+export interface TrendPoint { t: string; disk: number | null; ram: number | null; heap: number | null; cpu: number | null; shards: number | null }
+export interface Trends { clusterId: string; hours: number; points: TrendPoint[]; since: string; until: string }

@@ -206,6 +206,15 @@ read-only response editor. Non-GET requests are sent with `dryRun: true` first; 
 before the real call. History comes from `…/shell/history`; **Copy as curl** builds the API
 call.
 
+### Dashboard (`pages/Dashboard.tsx`)
+
+The home page (`/`). `useQueries` reads `GET /clusters/{id}/summary` and `…/trends?hours=24` per
+cluster (and `hours=168` only while **7 days** is picked), each refetched every 2 minutes, so rows
+fill in independently. Sorting is client-side; the default key is an "attention" score
+(not answering, red, critical alerts, yellow, warnings). The trend chart is a hand-drawn SVG
+(`TrendChart`: crosshair + tooltip, dashed threshold lines when every cluster shares them, at most
+8 series in the `--series-1…8` colours, which have light and dark values in `styles.css`).
+
 ### Alerts (`pages/admin/Alerts.tsx`)
 
 One query, `["alerts"]` → `GET /admin/alerts` (active alerts, snoozes, settings, Slack status, last

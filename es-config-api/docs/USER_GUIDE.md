@@ -47,12 +47,33 @@ Changing your password keeps you signed in on this browser and signs you out eve
 
 The console runs over plain HTTP on the internal network for now, so only sign in from trusted machines on that network.
 
+## Dashboard: all clusters at a glance
+
+After you sign in you land on the **Dashboard** (**All clusters** at the top of the sidebar). It has one row for every cluster you have access to; admins see all of them. **The page refreshes every 2 minutes** (the time of the last refresh is under the title); **Refresh now** reads every cluster at once.
+
+![Dashboard](images/55-dashboard.png)
+
+| Column | What it shows |
+| --- | --- |
+| Cluster | Id, name, Elasticsearch version; "7.x mode" for older clusters |
+| Status | Green, yellow or red with the node count, unassigned shards, and the active alerts (critical, warning, snoozed). "Not answering" when the cluster can't be read |
+| Disk, RAM, Heap, CPU | The worst node's value on the bar, the average under it. Amber and red follow that cluster's alert thresholds (70% and 80% unless an admin changed them). RAM is without the file cache (see *About RAM*) |
+| Shards | Shards in the cluster against its limit; new indices fail when it is full |
+| Size | Store size of all indices (replicas included), the number of indices, and the growth over about 7 days |
+| Trend · 24 h | A small line of the worst node over the last 24 hours, for the metric picked under **Trend** |
+
+- The rows that need attention come first (not answering, red, critical alerts, yellow, warnings). Click a column heading to sort by it; click a row to open that cluster's Overview.
+- Each cluster is read on its own, so a slow one shows "Reading the cluster…" without holding up the others.
+- **Trend** (Disk, RAM, JVM heap, CPU) picks the metric for the small lines and for the chart below the table. The chart has one line per cluster (the worst node), for the last **24 hours** or **7 days** (the peak of each half hour), with the warning and critical lines dashed. Point at the chart to read every cluster's value at that time. Times are in UTC.
+- The trend data comes from the 5-minute alert check, which saves one sample per cluster and keeps 8 days. Charts fill from the first check after the update, and size growth shows from the second day.
+
 ## Finding your way
 
-Everything happens on one cluster at a time: pick it in the **Cluster** box at the top of the sidebar, and every page below it shows that cluster.
+Apart from the Dashboard, everything happens on one cluster at a time: pick it in the **Cluster** box in the sidebar, and every page below it shows that cluster.
 
 ![Overview page](images/02-overview.png)
 
+- **Sidebar, All clusters:** the Dashboard (above)
 - **Sidebar, Configure:** Overview, Indices, Data, Index templates, Component templates, ILM policies, Ingest pipelines (the last four only if you have access to the whole cluster)
 - **Sidebar, Changes:** **Requests** (changes waiting for approval; the number shows how many need you) and **Shell** (Elasticsearch requests)
 - **Sidebar, Administration** (admins only): Cluster settings, Clusters, Users, Allowlist, Audit log

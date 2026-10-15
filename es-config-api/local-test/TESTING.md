@@ -75,6 +75,7 @@ the raw API at **http://localhost:8080/docs** (click an endpoint, **Try it out**
 | 37 | same | **Snooze** the disk alert for 1 hour with a reason; **Check now** again 5+ minutes later | The row says "Snoozed by …"; nothing new in Slack, and nothing about the snooze. The audit log has *Alert snoozed* |
 | 38 | same | Put Disk back to 70 / 80, **Save**, **End snooze**, **Check now** | The alert disappears; the channel gets "OK again · local" |
 | 39 | same | **Weekly digest → Preview**, then **Send now** | The preview lists size, shards, largest indices and request counts; the same summary arrives in Slack |
+| 40 | **All clusters** (any user) | Open the console's home page; wait 2 minutes or click **Refresh now**; click **CPU** under Trend, then **7 days** | One row per cluster you can access, with health, alerts, bars and size; "This page refreshes every 2 minutes"; the chart switches metric and period (it fills as the 5-minute check saves samples). Clicking a row opens that cluster's Overview |
 
 Steps 18–22 need the `es_console_api` account to have the `read` and `write` privileges. If you set up
 Elasticsearch before the data browser existed, run `1-start-elasticsearch.cmd` again (it's safe
@@ -191,7 +192,7 @@ With Elasticsearch running (step 1), from the `es-config-api` folder:
 .venv\Scripts\python -m pytest -q
 ```
 
-This runs 105 tests against your local Elasticsearch, with S3 simulated. With the API
+This runs 109 tests against your local Elasticsearch, with S3 simulated. With the API
 running (step 2), you can also run:
 
 ```cmd

@@ -232,6 +232,41 @@ curl -s -H "Authorization: Bearer $TOKEN" http://172.0.58.49/api/v1/clusters/elk
 
 `diskAvailableBytes` is what Elasticsearch can still use (it compares that with the watermarks). `ramUsedPercent` is RAM without the OS file cache: the memory Elasticsearch holds (heap committed + non-heap committed + direct buffers) over the node's RAM, and `ramFreeBytes` the rest. Elasticsearch doesn't report the OS "available" figure that `free -m` and CloudWatch show, so it is an estimate (other processes on the host aren't counted; usually a few percent below CloudWatch). `memUsedPercent` is Elasticsearch's own figure and counts the file cache as used, so 90–99% is normal there. Summary averages are over data nodes.
 
+### GET /api/v1/clusters/{clusterId}/summary
+
+One row of the Dashboard. Any access on the cluster is enough. A cluster that can't be read still answers `200`, with `"reachable": false`.
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" http://172.0.58.49/api/v1/clusters/bombas-elkop3/summary
+```
+
+```json
+{"clusterId": "bombas-elkop3", "name": "bombas (elkop3)", "checkedAt": "2026-10-15T07:14:02Z", "reachable": true,
+ "status": "green", "clusterName": "prod-bombas-order-processor-1", "versions": ["7.9.1"], "legacy": true,
+ "nodes": 3, "dataNodes": 3, "unassignedShards": 0,
+ "disk": {"avg": 61.2, "max": 64.8, "maxNode": "node2", "freeBytes": 412316860416, "totalBytes": 1099511627776},
+ "ram": {"avg": 55.0, "max": 58.1, "maxNode": "node1"}, "heap": {"avg": 47.3, "max": 51.0, "maxNode": "node3"},
+ "cpu": {"avg": 21.0, "max": 33.0, "maxNode": "node1"},
+ "shards": {"total": 1830, "limit": 3000, "perNode": 1000, "percent": 61.0},
+ "size": {"storeBytes": 512981237760, "docs": 1873345120, "indices": 412},
+ "growth": {"bytes": 21474836480, "docs": 40211873, "from": "2026-10-08", "to": "2026-10-15", "days": 7},
+ "alerts": {"critical": 0, "warning": 1, "snoozed": 0},
+ "thresholds": {"disk": {"on": true, "warn": 70, "crit": 80}, "ram": {"on": true, "warn": 70, "crit": 80},
+   "heap": {"on": true, "warn": 70, "crit": 80}, "cpu": {"on": true, "warn": 70, "crit": 80},
+   "shards": {"on": true, "warn": 70, "crit": 80}}}
+```
+
+`max` is the worst node (`maxNode`), `avg` the average (disk: data nodes). `size` is `_cluster/stats` (all indices, replicas included); `growth` comes from the daily index-size snapshots (open indices) and is `null` until there are two. Not answering: `{"reachable": false, "error": "Could not reach cluster: …", "errorCode": "CLUSTER_UNREACHABLE", "alerts": {…}, …}`.
+
+### GET /api/v1/clusters/{clusterId}/trends
+
+`?hours=24` (default) or `?hours=168` (7 days, the peak of each 30 minutes). One point per alert check (every 5 minutes), worst node per metric; kept 8 days.
+
+```json
+{"clusterId": "bombas-elkop3", "hours": 24, "since": "2026-10-14T07:14:00Z", "until": "2026-10-15T07:14:00Z",
+ "points": [{"t": "2026-10-15T07:10:00.000Z", "disk": 64.8, "ram": 58.1, "heap": 51.0, "cpu": 33.0, "shards": 61.0}]}
+```
+
 ## Cluster settings
 
 **Admins only** (every endpoint in this section returns `403 ADMIN_REQUIRED` for other users). Persistent cluster-wide settings (`_cluster/settings`). Updates are partial: send only the keys you want to change; `null` resets a key to its Elasticsearch default. Keys must be on the allowlist.
@@ -1597,5 +1632,6 @@ Every error has the same shape: an HTTP status, a stable `code`, a readable `mes
 | 400 | `NOT_CLEARABLE` | Only "node left" alerts can be cleared by hand |
 | 404 | `ALERT_NOT_FOUND`, `SNOOZE_NOT_FOUND` | The alert cleared, or the snooze ended, meanwhile |
 | 409 | `CHECK_IN_PROGRESS` | An alert check is running; try again in a minute |
+| 400 | `INVALID_PERIOD` | Trends: `hours` must be 24 or 168 |
 
 Every response carries an `X-Request-ID` header; quote it when reporting a problem, since the same id is in the audit log.

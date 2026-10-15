@@ -426,12 +426,18 @@ class AlertService:
         events: list[dict] = []
         firing: dict[str, list[dict]] = {}
 
+        # read every cluster (also with alerts off: the dashboard's trend charts use the readings)
+        with ThreadPoolExecutor(min(8, max(1, len(clusters)))) as pool:
+            results = dict(zip(clusters, pool.map(self._collect_safe, clusters)))
+        samples = {cid: self._sample(data, now) for cid, (data, err) in results.items() if data is not None}
+        samples = {k: v for k, v in samples.items() if v}
         if not settings["enabled"]:
             run["disabled"] = True
             st["alerts"], st["pending"], st["unannounced"] = {}, {}, {}
+            for cid in clusters:
+                run["clusters"][cid] = {"ok": results[cid][1] is None,
+                                        **({"error": results[cid][1]} if results[cid][1] else {})}
         else:
-            with ThreadPoolExecutor(min(8, max(1, len(clusters)))) as pool:
-                results = dict(zip(clusters, pool.map(self._collect_safe, clusters)))
             for bucket in ("alerts", "pending", "unannounced"):   # clusters that were removed
                 for k in [k for k in st[bucket] if k.split("|")[0] not in clusters]:
                     st[bucket].pop(k)
@@ -481,7 +487,8 @@ class AlertService:
 
         # best effort extras: they never undo or block the check above
         changed = False
-        for extra in (lambda: self._daily_sizes(st, now) if settings["enabled"] else False,
+        for extra in (lambda: self._record_samples(samples, st, now),
+                      lambda: self._daily_sizes(st, now),
                       lambda: self._maybe_digest(st, now) if settings["digest"]["enabled"] and send else False,
                       lambda: self._sweep_approvals() and False):
             try:
@@ -491,6 +498,26 @@ class AlertService:
         if changed and etag:
             self._save_state(st, etag)
         return {**run, "active": len(st["alerts"])}
+
+    @staticmethod
+    def _sample(data: dict, now: datetime) -> dict | None:
+        from .dashboard import sample_from
+        try:
+            return sample_from(data, now)
+        except Exception:
+            log.exception("could not build a trend sample")
+            return None
+
+    def _record_samples(self, samples: dict, st: dict, now: datetime) -> bool:
+        dash = getattr(self.app.state, "dashboard", None)
+        if not dash or not samples:
+            return False
+        dash.record(samples, now)
+        if st.get("metricsPrunedDate") != now.date().isoformat():
+            dash.prune(now)
+            st["metricsPrunedDate"] = now.date().isoformat()
+            return True
+        return False
 
     def _save_state(self, st: dict, etag: str | None) -> str | None:
         try:

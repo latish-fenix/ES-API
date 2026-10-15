@@ -1,4 +1,4 @@
-import { Link, Navigate, Route, Routes } from "react-router-dom";
+import { Link, Route, Routes } from "react-router-dom";
 import { NAMED_TYPES } from "./api";
 import { Page, Shell } from "./components/Shell";
 import { Empty, Loading } from "./components/ui";
@@ -12,21 +12,20 @@ import { ClusterSettings } from "./pages/ClusterSettings";
 import { Data } from "./pages/Data";
 import { IndexDetail } from "./pages/IndexDetail";
 import { Indices } from "./pages/Indices";
+import { Dashboard } from "./pages/Dashboard";
 import { Login } from "./pages/Login";
 import { NamedResources } from "./pages/NamedResources";
 import { Overview } from "./pages/Overview";
 import { RequestDetail, Requests } from "./pages/Requests";
 import { ShellPage } from "./pages/ShellPage";
-import { lastCluster, RequireAdmin, RequireAuth, useClusters, useMe } from "./session";
+import { RequireAdmin, RequireAuth, useClusters, useMe } from "./session";
 
 function Home() {
   const clusters = useClusters();
   const me = useMe().data!;
   if (clusters.isLoading) return <Loading />;
   const items = clusters.data ?? [];
-  const remembered = lastCluster();
-  const target = items.find((c) => c.id === remembered) ?? items[0];
-  if (target) return <Navigate to={`/c/${encodeURIComponent(target.id)}`} replace />;
+  if (items.length) return <Dashboard clusters={items} />;
   return (
     <Page crumbs={[{ label: "Home" }]} title="No clusters">
       <section className="card">

@@ -118,6 +118,9 @@ export function Shell() {
             <span className="brand-sub">Console</span>
           </span>
         </Link>
+        <div className="nav-group">
+          <NavItem to="/" end icon="dashboard" label="All clusters" />
+        </div>
         <ClusterSwitch current={clusterId} />
         {c && (
           <div className="nav-group">

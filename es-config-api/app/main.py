@@ -13,7 +13,8 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 
 from . import (routes_admin, routes_alerts, routes_approvals, routes_auth, routes_clusters, routes_config,
-               routes_data, routes_history, routes_shell)
+               routes_dashboard, routes_data, routes_history, routes_shell)
+from .dashboard import Dashboard
 from .alerts import AlertService
 from .slack import SlackNotifier
 from .approvals import ApprovalService
@@ -115,6 +116,7 @@ def _create_app(settings: Settings, store: ObjectStore, registry: ClusterRegistr
     app.state.shell = Shell(app)
     app.state.slack = SlackNotifier(secrets)
     app.state.alerts = AlertService(app, store, app.state.slack, settings.alert_interval_seconds)
+    app.state.dashboard = Dashboard(app, store)
     app.state.approvals = ApprovalService(store, app.state.users, app.state.audit,
                                           build_mailer(settings), settings,
                                           on_event=app.state.alerts.request_event)
@@ -157,6 +159,7 @@ def _create_app(settings: Settings, store: ObjectStore, registry: ClusterRegistr
     app.include_router(routes_history.router)
     app.include_router(routes_shell.router)   # before routes_config too
     app.include_router(routes_alerts.router)  # before routes_config too
+    app.include_router(routes_dashboard.router)  # before routes_config too
     app.include_router(routes_config.router)
     app.include_router(routes_admin.router)
     app.include_router(routes_clusters.router)
