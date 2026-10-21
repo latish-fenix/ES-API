@@ -65,7 +65,8 @@ SUSTAINED = {"cpu"}                           # must stay above the line for 2 c
 HEAP_KEY = "alerts/heap.json"
 HEAP_LOCK = ("_alerts", "run", "heap")
 HEAP_EVERY = 120
-HEAP_WINDOW, HEAP_NEED = 5, 3
+HEAP_WINDOW, HEAP_NEED = 5, 3                 # defaults; editable per cluster ("need" of the last "window")
+HEAP_KEEP = 15                                # readings kept per node (the largest window allowed)
 COLLECT_TIMEOUT = 15                          # seconds per Elasticsearch call during a check
 HYSTERESIS = 2.0                              # clears this many points below the line
 METRIC_LABEL = {"disk": "Disk", "ram": "RAM (excl. cache)", "heap": "JVM heap", "cpu": "CPU",
@@ -78,6 +79,7 @@ DEFAULT_SETTINGS: dict = {
     "enabled": True,
     "repeatMinutes": {"warning": 60, "critical": 5},
     "defaults": {**{m: {"on": True, "warn": 70, "crit": 80} for m in PERCENT_METRICS},
+                 "heap": {"on": True, "warn": 70, "crit": 80, "need": HEAP_NEED, "window": HEAP_WINDOW},
                  **{m: {"on": True} for m in STATE_METRICS}},
     "clusters": {},
     "digest": {"enabled": True},
@@ -130,12 +132,22 @@ def validate_settings(doc: Any, cluster_ids: set[str] | None = None) -> dict:
         if "on" in v:
             res["on"] = bool(v["on"])
         if m in PERCENT_METRICS:
+            extra = set(v) - {"on", "warn", "crit"} - ({"need", "window"} if m == "heap" else set())
+            if extra:
+                raise bad_request("INVALID_ALERT_SETTINGS", f"{where}.{m}: unknown field(s) {', '.join(sorted(extra))}")
             for f in ("warn", "crit"):
                 if f in v:
                     x = v[f]
                     if not isinstance(x, (int, float)) or not 1 <= x <= 100:
                         raise bad_request("INVALID_ALERT_SETTINGS", f"{where}.{m}.{f} must be 1–100")
                     res[f] = x
+            if m == "heap":
+                for f, hi in (("window", HEAP_KEEP), ("need", HEAP_KEEP)):
+                    if f in v:
+                        x = v[f]
+                        if not isinstance(x, int) or isinstance(x, bool) or not 1 <= x <= hi:
+                            raise bad_request("INVALID_ALERT_SETTINGS", f"{where}.heap.{f} must be a whole number 1–{hi}")
+                        res[f] = x
         elif set(v) - {"on"}:
             raise bad_request("INVALID_ALERT_SETTINGS", f"{where}.{m} only has 'on'")
         if not partial:
@@ -167,6 +179,9 @@ def validate_settings(doc: Any, cluster_ids: set[str] | None = None) -> dict:
             if b["warn"] > b["crit"]:
                 raise bad_request("INVALID_ALERT_SETTINGS", f"{where}.{m}: warning ({b['warn']}%) must not be "
                                                             f"above critical ({b['crit']}%)")
+            if m == "heap" and b["need"] > b["window"]:
+                raise bad_request("INVALID_ALERT_SETTINGS", f"{where}.heap: {b['need']} of the last {b['window']} "
+                                                            "readings is not possible (need must not exceed window)")
     dg = doc.get("digest") or {}
     out["digest"]["enabled"] = bool(dg.get("enabled", True))
     for f in ("updatedBy", "updatedAt"):
@@ -390,11 +405,13 @@ class AlertService:
                 v = n.get(field_)
                 if v is not None and effective(settings, cluster_id, metric).get("on"):
                     rows.append({"metric": metric, "node": n["name"], "value": float(v)})
-        if effective(settings, cluster_id, "heap").get("on"):
+        heff = effective(settings, cluster_id, "heap")
+        if heff.get("on"):
             names = {n["name"] for n in ns["nodes"]}
-            fresh = (self._now or utcnow()) - timedelta(seconds=HEAP_EVERY * HEAP_WINDOW + 60)
+            size = int(heff.get("window", HEAP_WINDOW))
+            fresh = (self._now or utcnow()) - timedelta(seconds=HEAP_EVERY * size + 60)
             for node, rs in sorted((self._heap.get(cluster_id) or {}).items()):
-                window = [r["v"] for r in rs if _parse(r["t"]) >= fresh][-HEAP_WINDOW:]
+                window = [r["v"] for r in rs if _parse(r["t"]) >= fresh][-size:]
                 if window and node in names:
                     rows.append({"metric": "heap", "node": node, "value": window[-1], "window": window})
         if data["shardLimit"] and effective(settings, cluster_id, "shards").get("on"):
@@ -583,10 +600,16 @@ class AlertService:
                 eff = effective(settings, cid, r["metric"])
                 prev = alerts.get(key)
                 if r["metric"] == "heap":
-                    sev, detail = self._heap_severity(r.pop("window"), eff, prev)
+                    window = r.pop("window")
+                    sev, detail = self._heap_severity(window, eff, prev)
                     if sev:
-                        conds[key] = {**r, "severity": sev, "detail": detail,
-                                      "threshold": eff["crit" if sev == "critical" else "warn"]}
+                        # lead with the rule and every reading: the latest one alone is often low (right
+                        # after garbage collection) and reads as a false alarm
+                        line = eff["crit" if sev == "critical" else "warn"]
+                        readings = ", ".join(f"{v:g}%" for v in window)
+                        conds[key] = {**r, "severity": sev, "detail": detail, "threshold": line,
+                                      "text": f"JVM heap on {r['node']}: {detail.split(' (every')[0]} at {line:g}% "
+                                              f"or more · readings (every 2 min, oldest first): {readings}"}
                     else:
                         recovered.add(key)
                     continue
@@ -678,15 +701,16 @@ class AlertService:
 
     @staticmethod
     def _heap_severity(window: list[float], eff: dict, prev: dict | None) -> tuple[str | None, str | None]:
-        """3 of the last 5 two-minute readings over the line (2 points lower to stay on)."""
+        """`need` of the last `window` two-minute readings over the line (2 points lower to stay on)."""
         warn, crit = float(eff["warn"]), float(eff["crit"])
+        need = int(eff.get("need", HEAP_NEED))
         cl = crit - (HYSTERESIS if prev and prev["severity"] == "critical" else 0)
         wl = warn - (HYSTERESIS if prev else 0)
         nc = sum(1 for v in window if v >= cl)
         nw = sum(1 for v in window if v >= wl)
-        if nc >= HEAP_NEED:
+        if nc >= need:
             return "critical", f"{nc} of the last {len(window)} readings (every 2 min) at or above {crit:g}%"
-        if nw >= HEAP_NEED:
+        if nw >= need:
             return "warning", f"{nw} of the last {len(window)} readings (every 2 min) at or above {warn:g}%"
         return None, None
 
@@ -1043,13 +1067,13 @@ class AlertService:
             clusters = sorted(self.app.state.registry.ids())
             with ThreadPoolExecutor(min(8, max(1, len(clusters)))) as pool:
                 results = dict(zip(clusters, pool.map(self._read_heap_safe, clusters)))
-            cutoff = now - timedelta(seconds=HEAP_EVERY * HEAP_WINDOW + 60)
+            cutoff = now - timedelta(seconds=HEAP_EVERY * HEAP_KEEP + 60)
             out: dict = {}
             for cid in clusters:
                 nodes = {n: [r for r in rs if _parse(r["t"]) >= cutoff]
                          for n, rs in ((doc.get("clusters") or {}).get(cid) or {}).items()}
                 for n, v in (results[cid] or {}).items():
-                    nodes[n] = (nodes.get(n, []) + [{"t": iso(now), "v": v}])[-HEAP_WINDOW:]
+                    nodes[n] = (nodes.get(n, []) + [{"t": iso(now), "v": v}])[-HEAP_KEEP:]
                 nodes = {n: rs for n, rs in nodes.items() if rs}
                 if nodes:
                     out[cid] = nodes

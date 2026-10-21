@@ -620,7 +620,7 @@ Alerts, approval requests and the weekly digest all go to that one channel. Unti
 | --- | --- | --- |
 | Disk | Disk used on a data node | 70% / 80% |
 | RAM (excl. cache) | Memory Elasticsearch holds on a node (see *About RAM* above) | 70% / 80% |
-| JVM heap | Heap read every 2 minutes; alerts when 3 of the last 5 readings are over the line (heap swings a lot, so one reading isn't enough) | 70% / 80% |
+| JVM heap | Heap read every 2 minutes; alerts when 3 of the last 5 readings are over the line (heap swings a lot, so one reading isn't enough). Both numbers can be changed under Thresholds | 70% / 80% |
 | CPU | CPU, above the line for 2 checks in a row | 70% / 80% |
 | Shards | Shards in the cluster against its limit (new indices fail at 100%) | 70% / 80% |
 | Cluster health | Yellow or red (unassigned shards) | always critical |
@@ -653,6 +653,7 @@ Snoozing is done in the console only, and nothing about it is posted to Slack. A
 ![Thresholds for one cluster](images/53-alerts-thresholds.png)
 
 - **Defaults (all clusters):** turn alerts or the weekly digest off, change how often warnings and critical alerts repeat, and set each alert's on/off, warning and critical line.
+- **JVM heap rule:** on the JVM heap row, "Alert when **3** of the last **5** readings are over the line". Change either number (up to 15 readings = 30 minutes): a higher first number means fewer alerts, a bigger second number looks further back.
 - **Pick a cluster** to override some of them for that cluster only (overridden values are in bold; **Use defaults** removes an override), or tick **No alerts at all** for it.
 - The Overview's bars use the same lines, so they turn amber and red where the alerts start.
 

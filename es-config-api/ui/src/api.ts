@@ -601,7 +601,7 @@ export const enc = encodeURIComponent;
 export type AlertMetric = "disk" | "ram" | "heap" | "cpu" | "shards" | "health" | "nodes";
 export type Severity = "warning" | "critical";
 
-export interface MetricRule { on?: boolean; warn?: number; crit?: number }
+export interface MetricRule { on?: boolean; warn?: number; crit?: number; need?: number; window?: number }
 
 export interface AlertSettings {
   enabled: boolean;

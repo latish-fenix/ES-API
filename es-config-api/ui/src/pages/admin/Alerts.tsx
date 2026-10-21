@@ -18,7 +18,7 @@ export const METRIC_LABEL: Record<AlertMetric, string> = {
 const METRIC_NOTE: Record<AlertMetric, string> = {
   disk: "Disk used on each data node",
   ram: "RAM Elasticsearch holds, without the OS file cache (estimate, within ~5% of CloudWatch)",
-  heap: "JVM heap used; read every 2 minutes, alerts when 3 of the last 5 readings are over the line (heap swings a lot with garbage collection)",
+  heap: "JVM heap used, read every 2 minutes; heap swings a lot with garbage collection, so it alerts only when enough recent readings are over the line",
   cpu: "CPU; alerts after 2 checks in a row above the line",
   shards: "Shards in the cluster vs its limit (max_shards_per_node × data nodes); new indices fail past 100%",
   health: "Cluster yellow or red (unassigned shards): always critical",
@@ -364,7 +364,11 @@ function Thresholds({ settings }: { settings: AlertSettings }) {
   const bad = PCT.some((m) => {
     const r = rule(m);
     return r.warn == null || r.crit == null || r.warn < 1 || r.crit > 100 || r.warn > r.crit;
-  });
+  }) || (() => {
+    const h = rule("heap");
+    const n = h.need ?? 3, w = h.window ?? 5;
+    return !Number.isInteger(n) || !Number.isInteger(w) || n < 1 || w < 1 || w > 15 || n > w;
+  })();
   return (
     <section className="card">
       <div className="card-head">
@@ -411,12 +415,30 @@ function Thresholds({ settings }: { settings: AlertSettings }) {
                 const pct = PCT.includes(m);
                 return (
                   <tr key={m} style={cl?.off ? { opacity: 0.5 } : undefined}>
-                    <td><strong>{METRIC_LABEL[m]}</strong><div className="hint">{METRIC_NOTE[m]}</div></td>
+                    <td>
+                      <strong>{METRIC_LABEL[m]}</strong><div className="hint">{METRIC_NOTE[m]}</div>
+                      {m === "heap" && (
+                        <div className="row" style={{ gap: 6, marginTop: 6, flexWrap: "wrap", fontSize: 13.5 }}>
+                          Alert when
+                          <input className="input" type="number" min={1} max={15} aria-label="Readings that must be over the line" value={r.need ?? 3}
+                            disabled={!!cl?.off} style={{ width: 64, fontWeight: overridden(m, "need") ? 700 : undefined }}
+                            onChange={(e) => setRule(m, "need", Number(e.target.value))} />
+                          of the last
+                          <input className="input" type="number" min={1} max={15} aria-label="Readings looked at" value={r.window ?? 5}
+                            disabled={!!cl?.off} style={{ width: 64, fontWeight: overridden(m, "window") ? 700 : undefined }}
+                            onChange={(e) => setRule(m, "window", Number(e.target.value))} />
+                          readings are over the line
+                          <span className="hint">(= the last {((r.window ?? 5) * 2)} minutes)</span>
+                        </div>
+                      )}
+                      {m === "heap" && (r.need ?? 3) > (r.window ?? 5) && <div className="hint" style={{ color: "var(--danger)" }}>The first number can't be bigger than the second.</div>}
+                    </td>
                     <td><input type="checkbox" aria-label={`${METRIC_LABEL[m]} on`} checked={r.on !== false} disabled={!!cl?.off} onChange={(e) => setRule(m, "on", e.target.checked)} /></td>
                     <td>{pct ? <PctInput label={`${METRIC_LABEL[m]} warning`} value={r.warn} strong={overridden(m, "warn")} disabled={!!cl?.off} onChange={(v) => setRule(m, "warn", v)} /> : <span className="hint">—</span>}</td>
                     <td>{pct ? <PctInput label={`${METRIC_LABEL[m]} critical`} value={r.crit} strong={overridden(m, "crit")} disabled={!!cl?.off} onChange={(v) => setRule(m, "crit", v)} /> : <span className="hint">critical</span>}</td>
                     {scope && <td>{cl?.metrics[m] && <button type="button" className="btn btn-ghost btn-sm" onClick={() => {
                       setRule(m, "warn", undefined); setRule(m, "crit", undefined); setRule(m, "on", undefined);
+                      if (m === "heap") { setRule(m, "need", undefined); setRule(m, "window", undefined); }
                     }}>Use defaults</button>}</td>}
                   </tr>
                 );
@@ -424,7 +446,7 @@ function Thresholds({ settings }: { settings: AlertSettings }) {
             </tbody>
           </table>
         </div>
-        {bad && <span className="hint" style={{ color: "var(--danger)" }}>Each warning must be 1–100% and not above its critical.</span>}
+        {bad && <span className="hint" style={{ color: "var(--danger)" }}>Each warning must be 1–100% and not above its critical; the heap rule is up to 15 readings, and the first number can't be bigger than the second.</span>}
         {save.error && <ErrorCallout error={save.error} />}
         <div className="row" style={{ gap: 8, justifyContent: "flex-end" }}>
           {settings.updatedBy && <span className="hint grow">Last changed by {settings.updatedBy} {ago(settings.updatedAt)}</span>}
@@ -438,7 +460,7 @@ function Thresholds({ settings }: { settings: AlertSettings }) {
 
 function PctInput({ label, value, strong, disabled, onChange }: { label: string; value?: number; strong?: boolean; disabled?: boolean; onChange: (v: number) => void }) {
   return (
-    <span className="row nowrap" style={{ gap: 4 }}>
+    <span className="row nowrap" style={{ gap: 4, flexWrap: "nowrap", minWidth: 96 }}>
       <input className="input" type="number" min={1} max={100} aria-label={label} value={value ?? ""} disabled={disabled}
         style={{ width: 76, fontWeight: strong ? 700 : undefined }} onChange={(e) => onChange(Number(e.target.value))} />%
     </span>

@@ -1132,7 +1132,7 @@ curl -s -H "Authorization: Bearer $TOKEN" http://172.0.58.49/api/v1/admin/alerts
  "lastDigest": "2026-W41", "digestWhen": "Fridays 15:00 IST", "intervalSeconds": 300,
  "settings": {"enabled": true, "repeatMinutes": {"warning": 60, "critical": 5},
    "defaults": {"disk": {"on": true, "warn": 70, "crit": 80}, "ram": {"on": true, "warn": 70, "crit": 80},
-     "heap": {"on": true, "warn": 70, "crit": 80}, "cpu": {"on": true, "warn": 70, "crit": 80},
+     "heap": {"on": true, "warn": 70, "crit": 80, "need": 3, "window": 5}, "cpu": {"on": true, "warn": 70, "crit": 80},
      "shards": {"on": true, "warn": 70, "crit": 80}, "health": {"on": true}, "nodes": {"on": true}},
    "clusters": {}, "digest": {"enabled": true}},
  "slack": {"configured": true, "lastError": null, "secret": "es-config-api/slack"}}
@@ -1148,7 +1148,9 @@ The whole settings object (anything left out gets its default). Per-cluster over
 curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -X PUT http://172.0.58.49/api/v1/admin/alerts/settings -d '{"repeatMinutes": {"warning": 60, "critical": 5}, "defaults": {"disk": {"warn": 70, "crit": 80}}, "clusters": {"common-elkop2": {"metrics": {"disk": {"warn": 75, "crit": 85}}}}}'
 ```
 
-Errors: `INVALID_ALERT_SETTINGS` (unknown metric or cluster, warning above critical, values outside 1–100, repeat outside 5–1440 minutes). Audited as `ALERT_SETTINGS_UPDATE` with before/after.
+`heap` also has `need` and `window`: alert when `need` of the last `window` two-minute heap readings are over the line (default 3 of 5; `window` up to 15).
+
+Errors: `INVALID_ALERT_SETTINGS` (unknown metric, field or cluster, warning above critical, values outside 1–100, repeat outside 5–1440 minutes, heap `need` above `window` or `window` above 15). Audited as `ALERT_SETTINGS_UPDATE` with before/after.
 
 ### PUT /api/v1/admin/alerts/slack · DELETE · POST …/slack/_test
 

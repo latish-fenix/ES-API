@@ -14,7 +14,14 @@ from conftest import ROOT, as_user
 
 A = "/api/v1/admin/alerts"
 HOOK = "https://hooks.slack.com/services/T000/B000/abcdefghijklmnop"
-T0 = datetime(2026, 10, 14, 6, 0, tzinfo=timezone.utc)      # a Wednesday
+def _recent_start() -> datetime:
+    """3 hours ago, on the minute: inside the 7-day history views, and moved back a day if it falls
+    on a Friday (when the weekly digest would join in)."""
+    d = (datetime.now(timezone.utc) - timedelta(hours=3)).replace(second=0, microsecond=0)
+    return d - timedelta(days=1) if d.weekday() == 4 else d
+
+
+T0 = _recent_start()
 
 
 @pytest.fixture()
@@ -373,6 +380,8 @@ def test_review_regressions(env, client, slack):
     svc.sample_heap(base + timedelta(minutes=8))         # 60, 40, 60, 40, 60: 3 of 5
     svc.run_once(base + timedelta(minutes=8))
     assert [a["severity"] for a in heap()] == ["warning"]
+    assert heap()[0]["text"] == ("JVM heap on n1: 3 of the last 5 readings at 50% or more · "
+                                 "readings (every 2 min, oldest first): 60%, 40%, 60%, 40%, 60%")
     assert client.post(f"{A}/snoozes", json={"clusterId": "test", "metric": "heap", "duration": "resolved",
                                              "reason": "x"}, headers=ROOT).status_code == 201
     for i in range(4):                                   # 60, 30, 30, 30: back under
@@ -404,3 +413,28 @@ def test_digest_once_and_counts(env, client, slack):
     assert svc._maybe_digest(st, fri) is True and st["lastDigest"] == "2026-W42"
     n = len(slack.sent)
     assert svc._maybe_digest({}, fri) is True and len(slack.sent) == n     # another worker: already claimed
+
+
+def test_heap_rule_is_editable(env, client, slack):
+    svc: AlertService = env["app"].state.alerts
+    for bad in ({"defaults": {"heap": {"need": 6, "window": 5}}}, {"defaults": {"heap": {"window": 16}}},
+                {"defaults": {"heap": {"need": 0}}}, {"defaults": {"heap": {"need": 2.5}}},
+                {"defaults": {"disk": {"need": 3}}}, {"clusters": {"test": {"metrics": {"heap": {"need": 9}}}}}):
+        assert client.put(f"{A}/settings", json=bad, headers=ROOT).status_code == 400, bad
+    s = client.put(f"{A}/settings", json={"defaults": {**_quiet(heap={"warn": 50, "crit": 90}),
+                                                       "heap": {"warn": 50, "crit": 90}},
+                                          "clusters": {"test": {"metrics": {"heap": {"need": 2, "window": 3}}}}},
+                   headers=ROOT).json()
+    assert s["defaults"]["heap"] == {"on": True, "warn": 50, "crit": 90, "need": 3, "window": 5}
+    th = client.get("/api/v1/clusters/test/alerts", headers=ROOT).json()["thresholds"]["heap"]
+    assert th["need"] == 2 and th["window"] == 3
+    # 'test': 2 of the last 3; 'other': default 3 of 5
+    reads = {"test": iter([60.0, 40.0, 60.0]), "other": iter([60.0, 40.0, 60.0])}
+    svc._read_heap = lambda cid: {"n1": next(reads[cid])}
+    svc.collect = lambda cid: {"nodes": {"nodes": [{"name": "n1", "data": True}], "summary": {"dataNodes": 1}},
+                               "health": {"status": "green"}, "shards": 0, "shardLimit": None, "shardsPerNodeLimit": 1000}
+    for i in range(3):
+        svc.sample_heap(T0 + timedelta(minutes=2 * i))
+    svc.run_once(T0 + timedelta(minutes=4))
+    active = {a["clusterId"]: a for a in client.get(A, headers=ROOT).json()["active"] if a["metric"] == "heap"}
+    assert set(active) == {"test"} and "2 of the last 3 readings" in active["test"]["detail"]

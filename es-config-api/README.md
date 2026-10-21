@@ -392,7 +392,7 @@ one Slack channel (incoming webhook, set in **Admin → Alerts**, stored in Secr
 | --- | --- | --- |
 | Disk | disk used on each data node | 70% / 80% |
 | RAM (excl. cache) | memory Elasticsearch holds (heap + non-heap + direct buffers) / node RAM | 70% / 80% |
-| JVM heap | heap used, read every 2 minutes; 3 of the last 5 readings over the line | 70% / 80% |
+| JVM heap | heap used, read every 2 minutes; 3 of the last 5 readings over the line (both numbers editable) | 70% / 80% |
 | CPU | CPU, above the line for 2 checks | 70% / 80% |
 | Shards | shards of open indices / (`cluster.max_shards_per_node` × data nodes) | 70% / 80% |
 | Cluster health | yellow or red (unassigned shards) | critical |
@@ -423,9 +423,11 @@ one Slack channel (incoming webhook, set in **Admin → Alerts**, stored in Secr
   changes a cluster.
 - JVM heap swings 20–30 points within seconds (garbage collection), so it isn't judged on one
   reading: a light check reads every node's heap every 2 minutes (`alerts/heap.json`, the last
-  5 readings per node, one `_nodes/stats/jvm` call per cluster) and a heap alert needs 3 of the
-  last 5 over the line (critical: 3 at or above critical). It clears when fewer than 3 of 5
-  are within 2 points of the line. **Check now** adds a reading only if one is due.
+  15 readings per node, one `_nodes/stats/jvm` call per cluster) and a heap alert needs 3 of the
+  last 5 over the line (critical: 3 at or above critical). Both numbers are settings (`need` and
+  `window` on `heap`, up to 15 readings = 30 minutes), editable in the console and per cluster.
+  It clears when fewer than `need` readings are within 2 points of the line. **Check now** adds
+  a reading only if one is due.
 - Network: the server needs outbound HTTPS to `hooks.slack.com`.
 
 ## How a change runs
@@ -473,7 +475,7 @@ alerts/snoozes.json                          snoozes (who, until, reason)
 alerts/history/{date}.json                   alerts that started, changed or cleared that day
 alerts/sizes/{cluster}/{date}.json           index sizes once a day, for the weekly digest
 alerts/digests/{week}.json                   marks that week's digest as sent
-alerts/heap.json                             each node's last 5 heap readings (every 2 minutes), for heap alerts
+alerts/heap.json                             each node's last 15 heap readings (every 2 minutes), for heap alerts
 alerts/metrics/{cluster}/{date}.json         one sample per check (worst node: disk, RAM, heap, CPU, shards %), kept 8 days, for the dashboard
 locks/_alerts/run/check.lock                 held while one worker runs an alert check
 ```
