@@ -632,7 +632,7 @@ How often Slack hears about it:
 - again **every hour** while it is a warning, and **every 5 minutes** while it is critical
 - once more, as **OK again**, when it clears (2 points below the line, so a value hovering on the line doesn't flap)
 
-Each message names the cluster, the node, the value and the line, with a link to the cluster in the console. Approval requests appear in the same channel: new requests, and approved, rejected, failed or expired ones.
+Each message names the cluster, the node, the value and the line, when it started (in IST and US Pacific time, PST or PDT), and links to the cluster in the console. Approval requests appear in the same channel: new requests, and approved, rejected, failed or expired ones.
 
 ### Snooze an alert
 

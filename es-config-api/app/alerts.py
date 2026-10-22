@@ -74,6 +74,22 @@ METRIC_LABEL = {"disk": "Disk", "ram": "RAM (excl. cache)", "heap": "JVM heap", 
 SNOOZE_DURATIONS = {"1h": timedelta(hours=1), "4h": timedelta(hours=4), "24h": timedelta(hours=24),
                     "7d": timedelta(days=7), "resolved": None}
 IST = timezone(timedelta(hours=5, minutes=30))
+try:
+    from zoneinfo import ZoneInfo
+    PACIFIC = ZoneInfo("America/Los_Angeles")        # PST in winter, PDT in summer
+except Exception:                                    # no time-zone data (tzdata is in requirements.txt)
+    PACIFIC = None
+
+
+def slack_time(dt: datetime) -> str:
+    """'21 Oct 15:18 IST · 21 Oct 02:48 PDT' for Slack messages (the console itself stays in UTC)."""
+    out = dt.astimezone(IST).strftime("%d %b %H:%M") + " IST"
+    if PACIFIC is not None:
+        p = dt.astimezone(PACIFIC)
+        out += f" · {p.strftime('%d %b %H:%M')} {p.tzname()}"
+    else:
+        out += f" · {dt.astimezone(timezone.utc).strftime('%d %b %H:%M')} UTC"
+    return out
 
 DEFAULT_SETTINGS: dict = {
     "enabled": True,
@@ -779,7 +795,7 @@ class AlertService:
         for group, sev in ((crit, "critical"), (warn, "warning")):
             if not group:
                 continue
-            lines = [f"• {esc(self.describe(a))} · since {_parse(a['since']).strftime('%d %b %H:%M')} UTC" for a in group]
+            lines = [f"• {esc(self.describe(a))} · since {slack_time(_parse(a['since']))}" for a in group]
             atts.append({"color": COLORS[sev], "mrkdwn_in": ["text"],
                          "text": f"*{'Critical' if sev == 'critical' else 'Warning'}*\n" + "\n".join(lines)})
         if resolved:

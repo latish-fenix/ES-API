@@ -428,6 +428,7 @@ one Slack channel (incoming webhook, set in **Admin → Alerts**, stored in Secr
   `window` on `heap`, up to 15 readings = 30 minutes), editable in the console and per cluster.
   It clears when fewer than `need` readings are within 2 points of the line. **Check now** adds
   a reading only if one is due.
+- Times in Slack messages are in IST and US Pacific (PST/PDT, from the `tzdata` package); the console shows UTC.
 - Network: the server needs outbound HTTPS to `hooks.slack.com`.
 
 ## How a change runs

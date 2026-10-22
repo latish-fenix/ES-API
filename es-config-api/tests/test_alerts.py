@@ -438,3 +438,9 @@ def test_heap_rule_is_editable(env, client, slack):
     svc.run_once(T0 + timedelta(minutes=4))
     active = {a["clusterId"]: a for a in client.get(A, headers=ROOT).json()["active"] if a["metric"] == "heap"}
     assert set(active) == {"test"} and "2 of the last 3 readings" in active["test"]["detail"]
+
+
+def test_slack_times_in_ist_and_pacific():
+    from app.alerts import slack_time
+    assert slack_time(datetime(2026, 10, 21, 9, 48, tzinfo=timezone.utc)) == "21 Oct 15:18 IST · 21 Oct 02:48 PDT"
+    assert slack_time(datetime(2026, 12, 21, 9, 48, tzinfo=timezone.utc)) == "21 Dec 15:18 IST · 21 Dec 01:48 PST"
